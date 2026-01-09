@@ -1,0 +1,12 @@
+data
+outputs
+videos
+__pycache__/
+build
+install
+devel
+lockfiles
+.catkin_workspace
+.vscode
+bag
+wandb
