@@ -1,0 +1,8 @@
+int32 n
+string out_dir
+bool save_depth_png
+bool save_depth_npy
+---
+bool ok
+string[] prefixes
+string message

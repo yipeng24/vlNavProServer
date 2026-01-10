@@ -1,4 +1,16 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os
+import time
 import math
+from collections import deque
+from dataclasses import dataclass
+from typing import Optional, Deque
+
+import numpy as np
+import cv2
+
 import rclpy
 from rclpy.node import Node
 
@@ -7,23 +19,31 @@ from sensor_msgs.msg import Joy
 
 from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from kobuki_ros_interfaces.msg import MotorPower
+# from image_bridge.image_bridge_node import ImageBridgeNode
+from interfaces.srv import SaveLatest
+@dataclass
+class FramePack:
+    stamp_ns: int
+    rgb_bgr: Optional[np.ndarray]   # HxWx3 uint8
+    depth_u16: Optional[np.ndarray] # HxW uint16 (often mm)
 
 
 class XBotTeleop(Node):
     def __init__(self):
         super().__init__('xbot_teleop')
+        # self.img_bridge = ImageBridgeNode()
+        # =====topic config=====
         self.joy_topic = '/joy'
         self.cmd_vel_joy_topic = '/cmd_vel_joy'
         self.cmd_vel_nav_topic = '/cmd_vel_nav'
         self.cmd_vel_out_topic = '/cmd_vel'
         self.motor_power_topic = 'motor_power'  # kobuki_node 通常就是这个
-
         # 轴映射：
         self.axis_linear = 1
         self.axis_angular = 0
 
-        # 方向反了就改这里
-        self.invert_linear = False    # 很多手柄“前推”为负，这里默认反一下更常用
+        # 方向反了就改这里k
+        self.invert_linear = False
         self.invert_angular = False
 
         # 速度缩放
@@ -36,31 +56,35 @@ class XBotTeleop(Node):
 
         # 电机上电/断电按钮（不需要就设为 -1）
         self.enable_button = 3       # 例如 Y
-        self.disable_button = 1      # 例如 BF
+        self.disable_button = 1      # 例如 B
 
         # 启动时是否自动上电
         self.enable_on_start = True
 
         self.nav_hold_button = 0     # A 键
         self.require_nav_hold = True # True=按住A才用Nav2速度（更安全）
+        self.deadman_button = -1     
 
-        # =========================
-        # 内部状态
-        # =========================
         self.joy_cmd = Twist()       # 手柄算出来的速度
         self.nav_cmd = Twist()       # 订阅到的 Nav2 速度
         self.power_status = False
-        self.last_zero_vel_sent = True  # 避免一开始就刷 0
-        
+        self.last_zero_vel_sent = True
+
         self._last_buttons = None
         self._last_axes = None
         self.nav_button_pressed = False
 
-        # Pub: 手柄速度（可选，便于调试）
+        self.enable_snapshot = True
+        self.snapshot_button = 2          # 默认 X=2（不对就改）
+        self.save_depth_png = True
+        self.save_depth_npy = False       # 不需要就 False
+
+        # =========================
+        # Pub/Sub（原有）
+        # =========================
         self.joy_pub = self.create_publisher(Twist, self.cmd_vel_joy_topic, 10)
-        # Pub: 最终输出速度（真正驱动车）
         self.out_pub = self.create_publisher(Twist, self.cmd_vel_out_topic, 10)
-        # Publisher: motor_power（仿照 C++ transient_local）
+
         motor_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -69,16 +93,14 @@ class XBotTeleop(Node):
         )
         self.motor_pub = self.create_publisher(MotorPower, self.motor_power_topic, motor_qos)
 
-        # Sub: joy
         self.joy_sub = self.create_subscription(Joy, self.joy_topic, self.joy_callback, 10)
-
-        # Sub: nav2 cmd
         self.nav_sub = self.create_subscription(Twist, self.cmd_vel_nav_topic, self.nav_callback, 10)
 
-        # Timer: 定时发布（像 keyop.cpp 的 wall_timer）
+        # Timer: 定时发布
         period = 1.0 / max(1e-6, float(self.publish_rate_hz))
         self.timer = self.create_timer(period, self.spin_publish)
 
+        self.save_cli = self.create_client(SaveLatest, '/save_latest')
         if self.enable_on_start:
             self.enable()
 
@@ -90,6 +112,11 @@ class XBotTeleop(Node):
             f'  OUT={self.cmd_vel_out_topic}\n'
             f'  A(button[{self.nav_hold_button}]) hold => use Nav2 speed\n'
         )
+        if self.enable_snapshot:
+            self.get_logger().info(
+                f'📸 Snapshot enabled.\n'
+                f'  press button[{self.snapshot_button}] to save current\n'
+            )
 
     # -------------------------
     # 工具函数
@@ -116,21 +143,42 @@ class XBotTeleop(Node):
             return False
         return buttons[self.nav_hold_button] == 1
 
-    # -------------------------
-    # 回调：Nav2 速度
-    # -------------------------
+    def _deadman_pressed(self, buttons) -> bool:
+        # 默认 deadman_button=-1 => 永远允许（不改变你现有行为）
+        if self.deadman_button < 0:
+            return True
+        if self.deadman_button >= len(buttons):
+            return False
+        return buttons[self.deadman_button] == 1
+    
+    def trigger_save(self):
+        req = SaveLatest.Request()
+        req.n = 1
+        req.out_dir = "/home/yipeng/image_bridge_saved"
+        req.save_depth_png = True
+        req.save_depth_npy = False
+        fut = self.save_cli.call_async(req)
+        self.get_logger().info(f"📸 Saved current frame to: {req.out_dir}")
+
+    def save_current_frame(self):
+        # self.img_bridge.save_latest_to_disk(n=1)
+        self.trigger_save()
+
+
+
     def nav_callback(self, msg: Twist):
         self.nav_cmd = msg
 
-    # -------------------------
-    # 回调：手柄输入
-    # -------------------------
+
     def joy_callback(self, msg: Joy):
         axes = msg.axes
         buttons = msg.buttons
 
         # A键状态（按住用Nav2）
         self.nav_button_pressed = self._nav_hold_pressed(buttons)
+
+        if self.enable_snapshot and self._button_pressed_edge(buttons, self.snapshot_button):
+            self.save_current_frame()
 
         # enable/disable：按下沿触发
         if self._button_pressed_edge(buttons, self.enable_button):
@@ -174,13 +222,9 @@ class XBotTeleop(Node):
     # 定时输出：最终 /cmd_vel
     # -------------------------
     def spin_publish(self):
-        # 选择源：A按住 -> Nav2，否则 -> 手柄
-        #self.get_logger().info(f'Motor power: {self.power_status}')
         use_nav = (self.nav_button_pressed and self.power_status)
-
         out = self.nav_cmd if use_nav else self.joy_cmd
 
-        # 避免刷0：非零一直发；为零只发一次
         non_zero = (abs(out.linear.x) > 1e-9) or (abs(out.angular.z) > 1e-9)
 
         if non_zero:
@@ -195,7 +239,6 @@ class XBotTeleop(Node):
     # MotorPower 控制
     # -------------------------
     def enable(self):
-        # 先停
         self.out_pub.publish(Twist())
         self.last_zero_vel_sent = True
 
@@ -209,7 +252,6 @@ class XBotTeleop(Node):
             self.get_logger().warn('Motor power already ON')
 
     def disable(self):
-        # 先停
         self.out_pub.publish(Twist())
         self.last_zero_vel_sent = True
 
@@ -231,10 +273,9 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        # 退出保险：发0速度 + 断电（不想退出断电就注释 disable）
         try:
             node.out_pub.publish(Twist())
-            node.disable()
+            node.disable()  # 不想退出断电就注释
         except Exception:
             pass
         node.destroy_node()
