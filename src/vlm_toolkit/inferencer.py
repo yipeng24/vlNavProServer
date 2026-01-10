@@ -21,13 +21,3 @@ class VLMInferencer:
 
     def run(self, req: InferenceRequest) -> str:
         return self.backend.infer(req)
-
-import json
-
-class DummyBackend:
-    """For pipeline testing (no real model)."""
-    def infer(self, req: InferenceRequest) -> str:
-        h, w = req.rgb_frames_bgr[-1].shape[:2]
-        # return center-bottom-ish point
-        out = {"u": w // 2, "v": int(h * 0.8), "update": True, "confidence": 0.1}
-        return json.dumps(out)
