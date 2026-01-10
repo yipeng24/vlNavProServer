@@ -6,38 +6,33 @@ import time
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import Optional, Deque
-
-import numpy as np
-import cv2
-
+from typing import Optional, List, Tuple
 import rclpy
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 
 from geometry_msgs.msg import Twist
 from sensor_msgs.msg import Joy
 
-from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy, HistoryPolicy
 from kobuki_ros_interfaces.msg import MotorPower
-# from image_bridge.image_bridge_node import ImageBridgeNode
-from interfaces.srv import SaveLatest
-@dataclass
-class FramePack:
-    stamp_ns: int
-    rgb_bgr: Optional[np.ndarray]   # HxWx3 uint8
-    depth_u16: Optional[np.ndarray] # HxW uint16 (often mm)
 
+from image_pool.buffer import ImageRingBuffer
 
 class XBotTeleop(Node):
-    def __init__(self):
+    def __init__(self, ring : ImageRingBuffer = None):
         super().__init__('xbot_teleop')
-        # self.img_bridge = ImageBridgeNode()
+
         # =====topic config=====
         self.joy_topic = '/joy'
         self.cmd_vel_joy_topic = '/cmd_vel_joy'
         self.cmd_vel_nav_topic = '/cmd_vel_nav'
         self.cmd_vel_out_topic = '/cmd_vel'
         self.motor_power_topic = 'motor_power'  # kobuki_node 通常就是这个
+
+        self.joy_cmd = Twist()       # 手柄算出来的速度
+        self.nav_cmd = Twist()       # 订阅到的 Nav2 速度
+        # ===hardware_config 配置==================
+        self._latest_joy: Optional[Joy] = None
         # 轴映射：
         self.axis_linear = 1
         self.axis_angular = 0
@@ -61,12 +56,10 @@ class XBotTeleop(Node):
         # 启动时是否自动上电
         self.enable_on_start = True
 
+        #===nav2 配置==================
         self.nav_hold_button = 0     # A 键
-        self.require_nav_hold = True # True=按住A才用Nav2速度（更安全）
-        self.deadman_button = -1     
+        self.require_nav_hold = True # True=按住A才用Nav2速度（更安全）  
 
-        self.joy_cmd = Twist()       # 手柄算出来的速度
-        self.nav_cmd = Twist()       # 订阅到的 Nav2 速度
         self.power_status = False
         self.last_zero_vel_sent = True
 
@@ -74,11 +67,18 @@ class XBotTeleop(Node):
         self._last_axes = None
         self.nav_button_pressed = False
 
+        #= snapshot config ==============
         self.enable_snapshot = True
         self.snapshot_button = 2          # 默认 X=2（不对就改）
-        self.save_depth_png = True
-        self.save_depth_npy = False       # 不需要就 False
 
+        #=====vlm config ======
+        self.enable_vlm = True
+        self.vlm_button = 5       # B(示例)
+        self.vlm_k = 4
+        #=====ring buffer=====
+        self.ring = ring  # type: ImageRingBuffer
+        self.save_dir = '/home/yipeng/image_bridge_saved'
+        os.makedirs(self.save_dir, exist_ok=True)
         # =========================
         # Pub/Sub（原有）
         # =========================
@@ -100,27 +100,16 @@ class XBotTeleop(Node):
         period = 1.0 / max(1e-6, float(self.publish_rate_hz))
         self.timer = self.create_timer(period, self.spin_publish)
 
-        self.save_cli = self.create_client(SaveLatest, '/save_latest')
-        if self.enable_on_start:
-            self.enable()
-
         self.get_logger().info(
-            f'XBot teleop+mux started.\n'
-            f'  joy={self.joy_topic}\n'
-            f'  joy_cmd={self.cmd_vel_joy_topic}\n'
-            f'  nav_cmd={self.cmd_vel_nav_topic}\n'
-            f'  OUT={self.cmd_vel_out_topic}\n'
-            f'  A(button[{self.nav_hold_button}]) hold => use Nav2 speed\n'
-        )
-        if self.enable_snapshot:
-            self.get_logger().info(
-                f'📸 Snapshot enabled.\n'
-                f'  press button[{self.snapshot_button}] to save current\n'
+            "XBotTeleop started (shared ring = {}). "
+            "snapshot_button={}, vlm_button={}, nav={}".format(
+                "YES" if self.ring is not None else "NO",
+                self.snapshot_button,
+                self.vlm_button,
+                self.nav_hold_button
             )
+        )
 
-    # -------------------------
-    # 工具函数
-    # -------------------------
     @staticmethod
     def _apply_deadzone(v: float, dz: float) -> float:
         return 0.0 if abs(v) < dz else v
@@ -143,34 +132,35 @@ class XBotTeleop(Node):
             return False
         return buttons[self.nav_hold_button] == 1
 
-    def _deadman_pressed(self, buttons) -> bool:
-        # 默认 deadman_button=-1 => 永远允许（不改变你现有行为）
-        if self.deadman_button < 0:
-            return True
-        if self.deadman_button >= len(buttons):
-            return False
-        return buttons[self.deadman_button] == 1
-    
-    def trigger_save(self):
-        req = SaveLatest.Request()
-        req.n = 1
-        req.out_dir = "/home/yipeng/image_bridge_saved"
-        req.save_depth_png = True
-        req.save_depth_npy = False
-        fut = self.save_cli.call_async(req)
-        self.get_logger().info(f"📸 Saved current frame to: {req.out_dir}")
-
+    def _safe_get_latest(self, n: int):
+        try:
+            return self.ring.get_latest(n)
+        except Exception as e:
+            self.get_logger().error(f"ring.get_latest({n}) failed: {e}")
+            return []
+        
     def save_current_frame(self):
-        # self.img_bridge.save_latest_to_disk(n=1)
-        self.trigger_save()
+        # 存在检查
+        if self.ring is None:
+            self.get_logger().warn("No shared ring -> cannot save frame.")
+            return
+        info = self.ring.save_latest(out_dir=self.save_dir)
+        if info.get("ok", False):
+            self.get_logger().info(f"📸 {info.get('msg')} rgb={info.get('rgb_path')}")
+        else:
+            self.get_logger().warn(f"📸 Save failed: {info.get('msg')}")
 
-
-
+    def run_vlm_on_last_k(self):
+        self.get_logger().info("VLM triggered (not implemented).")
+        if self.ring is None:
+            self.get_logger().warn("No shared ring -> cannot fetch last K frames for VLM.")
+            return
+        
     def nav_callback(self, msg: Twist):
         self.nav_cmd = msg
 
-
     def joy_callback(self, msg: Joy):
+        self._latest_joy = msg
         axes = msg.axes
         buttons = msg.buttons
 
@@ -179,54 +169,53 @@ class XBotTeleop(Node):
 
         if self.enable_snapshot and self._button_pressed_edge(buttons, self.snapshot_button):
             self.save_current_frame()
-
+        if self.enable_vlm and self._button_pressed_edge(buttons, self.vlm_button):
+            self.run_vlm_on_last_k()
         # enable/disable：按下沿触发
         if self._button_pressed_edge(buttons, self.enable_button):
             self.enable()
         if self._button_pressed_edge(buttons, self.disable_button):
             self.disable()
 
-        # 读轴
-        try:
-            raw_lin = float(axes[self.axis_linear])
-            raw_ang = float(axes[self.axis_angular])
-        except Exception:
-            self.get_logger().warn('Joy axes index out of range. Check axis_linear/axis_angular.')
-            self._last_buttons = list(buttons)
-            self._last_axes = list(axes)
+
+        self._last_buttons = list(buttons)
+        self._last_axes = list(axes)
+
+    # 定时输出：最终 /cmd_vel
+    def spin_publish(self):
+        if self._latest_joy is None:
             return
+        joy = self._latest_joy
 
-        lin = self._apply_deadzone(raw_lin, self.deadzone)
-        ang = self._apply_deadzone(raw_ang, self.deadzone)
-
+        # 取轴
+        lin = 0.0
+        ang = 0.0
+        if self.axis_linear < len(joy.axes):
+            lin = joy.axes[self.axis_linear]
+        if self.axis_angular < len(joy.axes):
+            ang = joy.axes[self.axis_angular]
+        # 死区
+        lin = 0.0 if abs(lin) < self.deadzone else lin
+        ang = 0.0 if abs(ang) < self.deadzone else ang
+        # 反向
         if self.invert_linear:
             lin = -lin
         if self.invert_angular:
             ang = -ang
 
-        # deadman 或未上电：手柄速度强制0
-        if (not self._deadman_pressed(buttons)) or (not self.power_status):
+        if (not self.power_status):
             self.joy_cmd.linear.x = 0.0
             self.joy_cmd.angular.z = 0.0
         else:
             self.joy_cmd.linear.x = lin * self.scale_linear
             self.joy_cmd.angular.z = ang * self.scale_angular
 
-        # 发布一份 /cmd_vel_joy 方便你调试
         self.joy_pub.publish(self.joy_cmd)
 
-        self._last_buttons = list(buttons)
-        self._last_axes = list(axes)
-
-    # -------------------------
-    # 定时输出：最终 /cmd_vel
-    # -------------------------
-    def spin_publish(self):
         use_nav = (self.nav_button_pressed and self.power_status)
         out = self.nav_cmd if use_nav else self.joy_cmd
 
         non_zero = (abs(out.linear.x) > 1e-9) or (abs(out.angular.z) > 1e-9)
-
         if non_zero:
             self.out_pub.publish(out)
             self.last_zero_vel_sent = False
@@ -235,9 +224,7 @@ class XBotTeleop(Node):
                 self.out_pub.publish(out)
                 self.last_zero_vel_sent = True
 
-    # -------------------------
     # MotorPower 控制
-    # -------------------------
     def enable(self):
         self.out_pub.publish(Twist())
         self.last_zero_vel_sent = True

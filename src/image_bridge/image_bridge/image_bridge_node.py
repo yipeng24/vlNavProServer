@@ -13,7 +13,7 @@ from cv_bridge import CvBridge, CvBridgeError
 import cv2
 import numpy as np
 
-from .buffer import ImageRingBuffer, FramePack
+from image_pool.buffer import ImageRingBuffer, ImageFramePack
 from rclpy.qos import qos_profile_sensor_data
 from interfaces.srv import SaveLatest
 
@@ -23,7 +23,7 @@ def stamp_to_ns(msg: CompressedImage) -> int:
 
 
 class ImageBridgeNode(Node):
-    def __init__(self):
+    def __init__(self, ring: ImageRingBuffer = None):
         super().__init__('image_bridge_node')
 
         self.rgb_topic = '/net/color/image_rgb_compressed_2hz'
@@ -39,7 +39,7 @@ class ImageBridgeNode(Node):
         self.flip_depth = True
         self.flip_code = -1  # -1: both, 0: vertical, 1: horizontal
 
-        self.enable_viewer = True
+        self.enable_viewer = False
         self.viewer_hz = 10.0
         self.viewer_window = "image_bridge_latest_rgb"
         self.viewer_scale = 1.0  # >1 放大，<1 缩小
