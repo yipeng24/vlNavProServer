@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'waypoint_planner_node = waypoint_planner.waypoint_planner_node:main',
         ],
     },
 )

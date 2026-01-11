@@ -2,7 +2,7 @@
 import math
 import numpy as np
 
-from image_pool.image_pool.buffer import ImageRingBuffer
+from image_pool.buffer import ImageRingBuffer
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import Odometry
@@ -13,7 +13,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 # 如果你要直接让 Nav2 跑：用 action
 from rclpy.action import ActionClient
 from nav2_msgs.action import NavigateToPose
-
+from vlm_service.vlm_genai import VLMClient
 
 def yaw_from_quat(q):
     # q: geometry_msgs/Quaternion
@@ -24,9 +24,10 @@ def yaw_from_quat(q):
 
 
 class WaypointPlanner(Node):
-    def __init__(self, ring: ImageRingBuffer = None):
+    def __init__(self, ring: ImageRingBuffer = None, vlm: VLMClient = None):
         super().__init__("ilgp_waypoint_planner")
         self.ring = ring
+        self.vlm = vlm
 
         # ========= 配置区（按你习惯写死在脚本内）=========
         self.odom_topic = "/odom"
@@ -61,12 +62,13 @@ class WaypointPlanner(Node):
         # Nav2 action client
         self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
         self.nav_goal_handle = None
-        self.nav_in_flight = False
+        self.running = False
 
         self.timer = self.create_timer(1.0 / self.rate_hz, self._tick)
         # 状态
         self.state = "IDLE"
         self.pending_instruction = None  # 你输入的指令可以放这里
+
 
     def _on_odom(self, msg: Odometry):
         self.last_odom = msg
@@ -76,45 +78,67 @@ class WaypointPlanner(Node):
         # 外部（比如你主线程/teleop）设置新指令
         self.pending_instruction = text
 
+
     def _tick(self):
         # 1) 必要条件检查
         if self.last_odom is None:
             return
         if self.pending_instruction is None:
             return
-        if self.nav_in_flight:
+        if self.running:
             return
-        if not self.vlm.is_idle():   # 你VLM对象需要提供 is_idle()
+        if not self.vlm.isIDLE:   # 你VLM对象需要提供 is_idle()
             return
 
         # 2) 触发一次完整链路
         self._run_once(self.pending_instruction)
 
+
     def _run_once(self, instruction: str):
         self.state = "INFER"
 
-        packs = self.ring.get_latest(1)
-        if not packs:
+        packs = self.ring.get_latest(4)
+        if not packs or len(packs) < 1:
             self.state = "IDLE"
             return
-        p = packs[-1]
+        # 取出 4 帧历史（如果不足 4 帧就用现有的）
+        rgb_frames = []
+        depth_m = None
 
-        rgb = getattr(p, "rgb_bgr", None)
-        depth_m = getattr(p, "depth_m", None)  # 你需要确保 pack 里有 depth_m (meter)
-        if rgb is None or depth_m is None:
+        for pk in packs:
+            rgb = getattr(pk, "rgb_bgr", None)
+            if rgb is not None:
+                rgb_frames.append(rgb)
+        # 取最后一帧的 depth_m
+        p_last = packs[-1]
+        depth_m = getattr(p_last, "depth_m", None)
+        if len(rgb_frames) == 0 or depth_m is None:
             self.state = "IDLE"
             return
 
         # ====== VLM 推理得到 uv ======
-        # 你自己实现：输入 instruction + rgb（也可以加4帧历史）
-        uv = self.vlm.infer_uv(instruction, rgb)   # -> (u,v)
-        if uv is None:
+        vlm_ret = self.vlm.infer_vlm(instruction, rgb_frames)
+        # 保存 VLM 用时/结果，后面 waypoint/日志会用
+        self.last_vlm = vlm_ret
+        vlm_elapsed_s = vlm_ret.get("elapsed_s", None)
+        vlm_raw = vlm_ret.get("raw_text", "")
+
+        if not vlm_ret.get("ok", False):
+            # 失败就回到空闲（或者加重试/降级策略）
+            self.get_logger().warn(f"VLM infer failed: {vlm_ret.get('error', 'unknown')}")
             self.state = "IDLE"
             return
-        u, v = int(uv[0]), int(uv[1])
 
+        uv = vlm_ret.get("uv", None)
+        if uv is None:
+            self.get_logger().warn("VLM returned ok but uv is None")
+            self.state = "IDLE"
+            return
+        
+        u, v = int(uv[0]), int(uv[1])
         # ====== depth 解算 waypoint ======
         goal_pose = self._uv_depth_to_goal(u, v, depth_m)
+        self.get_logger().info(f"VLM uv: ({u},{v}), goal: {goal_pose.pose.position.x:.2f},{goal_pose.pose.position.y:.2f} (in {vlm_elapsed_s:.2f}s)")
         if goal_pose is None:
             self.state = "IDLE"
             return
@@ -125,40 +149,6 @@ class WaypointPlanner(Node):
         self._send_nav2(goal_pose)
         self.state = "NAVIGATING"
 
-    def _run_once(self, instruction: str):
-        self.state = "INFER"
-
-        packs = self.ring.get_latest(1)
-        if not packs:
-            self.state = "IDLE"
-            return
-        p = packs[-1]
-
-        rgb = getattr(p, "rgb_bgr", None)
-        depth_m = getattr(p, "depth_m", None)  # 你需要确保 pack 里有 depth_m (meter)
-        if rgb is None or depth_m is None:
-            self.state = "IDLE"
-            return
-
-        # ====== VLM 推理得到 uv ======
-        # 你自己实现：输入 instruction + rgb（也可以加4帧历史）
-        uv = self.vlm.infer_uv(instruction, rgb)   # -> (u,v)
-        if uv is None:
-            self.state = "IDLE"
-            return
-        u, v = int(uv[0]), int(uv[1])
-
-        # ====== depth 解算 waypoint ======
-        goal_pose = self._uv_depth_to_goal(u, v, depth_m)
-        if goal_pose is None:
-            self.state = "IDLE"
-            return
-
-        self.pub_goal.publish(goal_pose)
-
-        # ====== 直接发 Nav2 action ======
-        self._send_nav2(goal_pose)
-        self.state = "NAVIGATING"
 
     def _uv_depth_to_goal(self, u: int, v: int, depth_m):
         h, w = depth_m.shape[:2]
@@ -201,31 +191,34 @@ class WaypointPlanner(Node):
         goal.pose.orientation = odom_pose.orientation  # 先保持不变
         return goal
 
+
     def _send_nav2(self, goal_pose: PoseStamped):
         if not self.nav_client.server_is_ready():
             # action server 还没起来就别发
-            self.nav_in_flight = False
+            self.running = False
             self.state = "IDLE"
             return
 
-        self.nav_in_flight = True
+        self.running = True
         nav_goal = NavigateToPose.Goal()
         nav_goal.pose = goal_pose
 
         fut = self.nav_client.send_goal_async(nav_goal)
         fut.add_done_callback(self._on_goal_response)
 
+
     def _on_goal_response(self, future):
         gh = future.result()
         if not gh.accepted:
-            self.nav_in_flight = False
+            self.running = False
             self.state = "IDLE"
             return
         res_fut = gh.get_result_async()
         res_fut.add_done_callback(self._on_nav_result)
 
+
     def _on_nav_result(self, future):
         _ = future.result()
         # 到达/失败都解锁，下一次 VLM idle 会再次触发
-        self.nav_in_flight = False
+        self.running = False
         self.state = "IDLE"

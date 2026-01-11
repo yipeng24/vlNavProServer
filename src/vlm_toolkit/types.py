@@ -18,3 +18,4 @@ class VLMOutput:
     finish: bool = True                # 执行完成则不更新: False
     raw_text: Optional[str] = None
     meta: Optional[Dict[str, Any]] = None
+

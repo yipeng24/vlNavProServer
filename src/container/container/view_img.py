@@ -2,13 +2,14 @@
 import cv2
 
 class RingViewer:
-    def __init__(self, ring, buffer_maxlen=30, window="ILGP Viewer", scale=1.0):
+    def __init__(self, ring, buffer_maxlen=30, scale=1.0):
         self.ring = ring
         self.buffer_maxlen = buffer_maxlen
-        self.window = window
         self.scale = scale
-        cv2.namedWindow(self.window, cv2.WINDOW_NORMAL)
+        cv2.namedWindow("ILGP Viewer", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("Planer Viewer", cv2.WINDOW_AUTOSIZE)
 
+    
     def tick(self):
         packs = self.ring.get_latest(1)
         if not packs:
@@ -27,6 +28,5 @@ class RingViewer:
         if abs(self.scale - 1.0) > 1e-3:
             vis = cv2.resize(vis, None, fx=self.scale, fy=self.scale,
                              interpolation=cv2.INTER_NEAREST)
-
         cv2.imshow(self.window, vis)
         cv2.waitKey(1)  # 这个一定要在主线程

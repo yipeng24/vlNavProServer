@@ -1,6 +1,6 @@
-#!/usr/bin/env python3
-# ilgp_container.py
-
+import sys
+print("PYTHON EXEC:", sys.executable)
+print("PYTHON PATH 0:", sys.path[0])
 import time
 import rclpy
 from rclpy.executors import MultiThreadedExecutor
@@ -8,8 +8,13 @@ from rclpy.executors import MultiThreadedExecutor
 import threading
 
 from image_pool.buffer import ImageRingBuffer
+
+from vlm_service.vlm_genai import VLMClient
+
 from image_bridge.image_bridge_node import ImageBridgeNode
 from xbot_teleop.xbot_teleop_node import XBotTeleop
+from waypoint_planner.waypoint_planner_node import WaypointPlanner
+
 from .view_img import RingViewer 
 
 def main():
@@ -20,20 +25,24 @@ def main():
         maxlen=30,
         sync_tolerance_ms=200
     )
+    vlm_client = VLMClient()  # 如果你要在 container 里直接用 VLMClient，可以在这里实例化
 
     # 把同一个 ring 注入两个节点
     img_node = ImageBridgeNode(ring=ring)
     teleop_node = XBotTeleop(ring=ring)
-
+    waypoint_planner_node = WaypointPlanner(ring=ring, vlm=vlm_client)
     executor = MultiThreadedExecutor(num_threads=4)
+
     executor.add_node(img_node)
     executor.add_node(teleop_node)
+    executor.add_node(waypoint_planner_node)
 
     # 让 executor 在后台线程跑（ROS 回调随便多线程）
     spin_thread = threading.Thread(target=executor.spin, daemon=True)
     spin_thread.start()
 
-    viewer = RingViewer(ring, buffer_maxlen=30, window="ILGP Viewer", scale=1.0)
+    viewer = RingViewer(ring, buffer_maxlen=30, scale=1.0)
+
     try:
         while rclpy.ok():
             viewer.tick()
