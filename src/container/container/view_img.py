@@ -11,7 +11,6 @@ class RingViewer:
 
     
     def tick(self):
-          
         packs = self.ring.get_latest(1)
         if not packs:
             print("No image in ring buffer yet.")  
