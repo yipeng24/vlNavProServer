@@ -42,11 +42,13 @@ def main():
     spin_thread.start()
 
     viewer = RingViewer(ring, buffer_maxlen=30, scale=1.0)
-
+    
     try:
         while rclpy.ok():
+            # rclpy.logging.get_logger("ilgp_container").info("Container running...")
+            # rclpy.logging.get_logger("ilgp_container").info(f"Ring buffer size: {ring.size()}/30")
             viewer.tick()
-            time.sleep(0.01)  # ~100Hz 刷新（你也可以 0.03 约 30Hz）
+            time.sleep(0.1)  # ~100Hz 刷新（你也可以 0.03 约 30Hz）
     except KeyboardInterrupt:
         pass
     finally:

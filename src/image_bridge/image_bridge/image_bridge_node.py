@@ -46,10 +46,7 @@ class ImageBridgeNode(Node):
 
         # =========================
         self.bridge = CvBridge()
-        self.ring = ImageRingBuffer(
-            maxlen=self.buffer_maxlen,
-            sync_tolerance_ms=self.sync_tolerance_ms
-        )
+        self.ring = ring
 
         self.sub_rgb = self.create_subscription(
             CompressedImage, self.rgb_topic, self.on_rgb, qos_profile_sensor_data
@@ -99,6 +96,7 @@ class ImageBridgeNode(Node):
     def on_timer(self):
         self.get_logger().info(f"ring size = {self.ring.size()}")
 
+
     def on_rgb(self, msg: CompressedImage):
         # self.get_logger().info(f"RGB msg stamp: {msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d}")
         try:
@@ -116,9 +114,7 @@ class ImageBridgeNode(Node):
 
     def on_depth(self, msg: CompressedImage):
         stamp_ns = stamp_to_ns(msg)
-        # self.get_logger().info(
-        #     f"DEPTH msg stamp: {msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d} format={msg.format}"
-        # )
+        # self.get_logger().info(f"DEPTH msg stamp: {msg.header.stamp.sec}.{msg.header.stamp.nanosec:09d} format={msg.format}")
         try:
             if "compressedDepth" in msg.format:
                 raw = bytes(msg.data)

@@ -45,7 +45,7 @@ class WaypointPlanner(Node):
         self.max_goal_dist_m = 2.0   # 限制一次 waypoint 不要太远（安全）
 
         # 控制频率
-        self.rate_hz = 5.0  # 先 5Hz，之后你可以跟 VLM 的 1Hz 对齐
+        self.rate_hz = 0.5  # 先 5Hz，之后你可以跟 VLM 的 1Hz 对齐
         # =============================================
 
         qos = QoSProfile(
@@ -67,7 +67,7 @@ class WaypointPlanner(Node):
         self.timer = self.create_timer(1.0 / self.rate_hz, self._tick)
         # 状态
         self.state = "IDLE"
-        self.pending_instruction = None  # 你输入的指令可以放这里
+        self.pending_instruction = "去椅子右边"  # 你输入的指令可以放这里
 
 
     def _on_odom(self, msg: Odometry):
@@ -80,6 +80,8 @@ class WaypointPlanner(Node):
 
 
     def _tick(self):
+        self.get_logger().info(f"WaypointPlanner state: {self.state}")
+        self.get_logger().info(f"last_odom: {self.last_odom is not None}, pending_instruction: {self.pending_instruction}, running: {self.running}, vlm isIDLE: {self.vlm.isIDLE if self.vlm else 'N/A'}")
         # 1) 必要条件检查
         if self.last_odom is None:
             return
@@ -99,25 +101,28 @@ class WaypointPlanner(Node):
 
         packs = self.ring.get_latest(4)
         if not packs or len(packs) < 1:
+            self.get_logger().info("Not enough image frames in ring buffer.")
             self.state = "IDLE"
             return
         # 取出 4 帧历史（如果不足 4 帧就用现有的）
         rgb_frames = []
         depth_m = None
-
         for pk in packs:
             rgb = getattr(pk, "rgb_bgr", None)
             if rgb is not None:
                 rgb_frames.append(rgb)
+        self.get_logger().info(f"Using {len(rgb_frames)} image frames from ring buffer for VLM inference.")
         # 取最后一帧的 depth_m
         p_last = packs[-1]
-        depth_m = getattr(p_last, "depth_m", None)
+        depth_m = getattr(p_last, "depth", None)
         if len(rgb_frames) == 0 or depth_m is None:
+            self.get_logger().info("No valid rgb/depth frames in ring buffer.")
             self.state = "IDLE"
             return
 
         # ====== VLM 推理得到 uv ======
         vlm_ret = self.vlm.infer_vlm(instruction, rgb_frames)
+        self.get_logger().info(f"VLM returned: {vlm_ret}")
         # 保存 VLM 用时/结果，后面 waypoint/日志会用
         self.last_vlm = vlm_ret
         vlm_elapsed_s = vlm_ret.get("elapsed_s", None)
@@ -151,12 +156,15 @@ class WaypointPlanner(Node):
 
 
     def _uv_depth_to_goal(self, u: int, v: int, depth_m):
+        self.get_logger().info(f"Computing goal from uv=({u},{v})")
         h, w = depth_m.shape[:2]
         if not (0 <= u < w and 0 <= v < h):
+            self.get_logger().warn(f"uv=({u},{v}) out of depth image bounds ({w},{h})")
             return None
 
-        z = float(depth_m[v, u])
+        z = float(depth_m[v, u])/1000
         if not (self.depth_min_m <= z <= self.depth_max_m):
+            self.get_logger().warn(f"Depth at uv=({u},{v}) is {z:.2f}m out of range [{self.depth_min_m},{self.depth_max_m}]")
             return None
 
         # 像素反投影（相机坐标）
@@ -184,11 +192,12 @@ class WaypointPlanner(Node):
 
         goal = PoseStamped()
         goal.header.stamp = self.get_clock().now().to_msg()
-        goal.header.frame_id = self.goal_frame
+        # goal.header.frame_id = self.goal_frame
         goal.pose.position.x = float(gx)
         goal.pose.position.y = float(gy)
         goal.pose.position.z = 0.0
         goal.pose.orientation = odom_pose.orientation  # 先保持不变
+        self.get_logger().info(f"Computed goal at ({gx:.2f}, {gy:.2f}) in frame.")
         return goal
 
 

@@ -123,7 +123,7 @@ class VLMClient:
         t0 = time.perf_counter()
         try:
             response = self.client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-2.5-flash-lite",
                 contents=contents,
             )
             elapsed_s = time.perf_counter() - t0

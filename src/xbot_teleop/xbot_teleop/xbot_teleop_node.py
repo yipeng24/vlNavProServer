@@ -95,7 +95,9 @@ class XBotTeleop(Node):
 
         self.joy_sub = self.create_subscription(Joy, self.joy_topic, self.joy_callback, 10)
         self.nav_sub = self.create_subscription(Twist, self.cmd_vel_nav_topic, self.nav_callback, 10)
-
+        
+        if self.enable_on_start:
+            self.enable()
         # Timer: 定时发布
         period = 1.0 / max(1e-6, float(self.publish_rate_hz))
         self.timer = self.create_timer(period, self.spin_publish)
@@ -114,6 +116,7 @@ class XBotTeleop(Node):
     def _apply_deadzone(v: float, dz: float) -> float:
         return 0.0 if abs(v) < dz else v
 
+
     def _button_pressed_edge(self, buttons, idx: int) -> bool:
         if idx < 0:
             return False
@@ -122,6 +125,7 @@ class XBotTeleop(Node):
         if idx >= len(buttons) or idx >= len(self._last_buttons):
             return False
         return (self._last_buttons[idx] == 0) and (buttons[idx] == 1)
+
 
     def _nav_hold_pressed(self, buttons) -> bool:
         if not self.require_nav_hold:
@@ -132,6 +136,7 @@ class XBotTeleop(Node):
             return False
         return buttons[self.nav_hold_button] == 1
 
+
     def _safe_get_latest(self, n: int):
         try:
             return self.ring.get_latest(n)
@@ -139,6 +144,7 @@ class XBotTeleop(Node):
             self.get_logger().error(f"ring.get_latest({n}) failed: {e}")
             return []
         
+
     def save_current_frame(self):
         # 存在检查
         if self.ring is None:
@@ -150,14 +156,17 @@ class XBotTeleop(Node):
         else:
             self.get_logger().warn(f"📸 Save failed: {info.get('msg')}")
 
+
     def run_vlm_on_last_k(self):
         self.get_logger().info("VLM triggered (not implemented).")
         if self.ring is None:
             self.get_logger().warn("No shared ring -> cannot fetch last K frames for VLM.")
             return
         
+
     def nav_callback(self, msg: Twist):
         self.nav_cmd = msg
+
 
     def joy_callback(self, msg: Joy):
         self._latest_joy = msg
@@ -186,7 +195,7 @@ class XBotTeleop(Node):
         if self._latest_joy is None:
             return
         joy = self._latest_joy
-
+        #self.get_logger().info(f"Joy axes: {joy.axes[self.axis_linear]}, buttons: {joy.buttons[self.axis_angular]}")
         # 取轴
         lin = 0.0
         ang = 0.0
@@ -209,13 +218,14 @@ class XBotTeleop(Node):
         else:
             self.joy_cmd.linear.x = lin * self.scale_linear
             self.joy_cmd.angular.z = ang * self.scale_angular
-
+        # self.get_logger().info(f"Publishing joy cmd_vel: lin={self.joy_cmd.linear.x}, ang={self.joy_cmd.angular.z}")
         self.joy_pub.publish(self.joy_cmd)
 
         use_nav = (self.nav_button_pressed and self.power_status)
         out = self.nav_cmd if use_nav else self.joy_cmd
 
         non_zero = (abs(out.linear.x) > 1e-9) or (abs(out.angular.z) > 1e-9)
+
         if non_zero:
             self.out_pub.publish(out)
             self.last_zero_vel_sent = False

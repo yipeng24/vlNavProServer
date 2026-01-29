@@ -7,12 +7,14 @@ class RingViewer:
         self.buffer_maxlen = buffer_maxlen
         self.scale = scale
         cv2.namedWindow("ILGP Viewer", cv2.WINDOW_NORMAL)
-        cv2.namedWindow("Planer Viewer", cv2.WINDOW_AUTOSIZE)
+        # cv2.namedWindow("Planer Viewer", cv2.WINDOW_AUTOSIZE)
 
     
     def tick(self):
+          
         packs = self.ring.get_latest(1)
         if not packs:
+            print("No image in ring buffer yet.")  
             cv2.waitKey(1)
             return
 
@@ -28,5 +30,5 @@ class RingViewer:
         if abs(self.scale - 1.0) > 1e-3:
             vis = cv2.resize(vis, None, fx=self.scale, fy=self.scale,
                              interpolation=cv2.INTER_NEAREST)
-        cv2.imshow(self.window, vis)
+        cv2.imshow("ILGP Viewer", vis)
         cv2.waitKey(1)  # 这个一定要在主线程
