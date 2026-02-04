@@ -29,7 +29,11 @@ class teleop_base:
 
         self.snapshot_button = joy_enum.B     # B 键
         self.snapshot_button_pressed = False
-        self._trans_snapshot_trigger = False
+        self._trans_snapshot_triggered = False
+
+        self._call_vlm_button = joy_enum.LB  # LB 键
+        self._call_vlm_button_pressed = False
+        self._trans_vlm_triggered = False
 
 
     def joy_update(self, joy: Joy):
@@ -38,8 +42,12 @@ class teleop_base:
         self.nav_button_pressed = self._button_hold_pressed(joy_enum.A)
 
         self.snapshot_button_pressed = self._button_pressed_edge(joy_enum.B)
-        if self.snapshot_button_pressed and not self._trans_snapshot_trigger:
-            self._trans_snapshot_trigger = True
+        if self.snapshot_button_pressed and not self._trans_snapshot_triggered:
+            self._trans_snapshot_triggered = True
+
+        self._call_vlm_button_pressed = self._button_pressed_edge(self._call_vlm_button)
+        if self._call_vlm_button_pressed and not self._trans_vlm_triggered:
+            self._trans_vlm_triggered = True
 
         self._lastest_joy_state = self._joy_state
 

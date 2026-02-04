@@ -5,25 +5,42 @@ import time
 import cv2
 import numpy as np
 import rclpy
+import tf2_ros
+
+import threading
+
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy, DurabilityPolicy,qos_profile_sensor_data
 
-from sensor_msgs.msg import Joy
+from sensor_msgs.msg import Joy, CameraInfo, CompressedImage
 from geometry_msgs.msg import Twist
-from sensor_msgs.msg import CompressedImage
 from kobuki_ros_interfaces.msg import MotorPower
 from cv_bridge import CvBridge
 
 from applications.teleop_base import teleop_base
 from applications.buffer import ImageRingBuffer
+from applications.vlm_api import VLMClient
+from applications.image_exta import image_exta
+
 def stamp_to_ns(msg: CompressedImage) -> int:
     return int(msg.header.stamp.sec) * 1_000_000_000 + int(msg.header.stamp.nanosec)
+
+@dataclass
+class nav_info:
+    stamp_ns: int
+    image_color: np.ndarray
+    image_depth: np.ndarray
+    image_uv: tuple[int, int]
+    local_map_waypoint: tuple[float, float]
+    vlm_result: dict
 
 
 @dataclass
 class ILGP_State(Enum):
     INIT = auto(),
+    TEST_VLM = auto(),
     WAIT_TRIGGER = auto(),
+    INFER_VLM = auto(),
     PLAN_TRAJ = auto(),
     Moving = auto(),
 
@@ -34,12 +51,17 @@ class singleTh_container(Node):
         # plugin-1: movement, initialize teleop_base
         self._teleop_base: teleop_base = teleop_base()
         self._image_pool_ring: ImageRingBuffer = ImageRingBuffer(maxlen=30, sync_tolerance_ms=200)
+        self.vlm_client: VLMClient = VLMClient()
+        self.image_exta: image_exta = image_exta()
         self._state: ILGP_State = ILGP_State.INIT
+        self.result_nav_info: nav_info = None
 
         self.nav_vel = Twist()
-        self._sub_joy = self.create_subscription(Joy, self.joy_topic, self.joy_callback, 10)
-        self._sub_nav = self.create_subscription(Twist, self.cmd_vel_nav_topic, self.nav_callback, 10)
-
+        self._sub_joy = self.create_subscription(Joy, "/joy", self.joy_callback, 10)
+        self._sub_nav = self.create_subscription(Twist, "/cmd_nav", self.nav_callback, 10)
+        self.sub_rgb = self.create_subscription(CompressedImage, self.rgb_topic, self.rgb_callback, qos_profile_sensor_data)
+        self.sub_depth = self.create_subscription(CompressedImage, self.depth_topic, self.depth_callback, qos_profile_sensor_data)
+        self.sub_camera_info = self.create_subscription(CameraInfo, self.camera_info_topic, self.camera_info_callback, qos_profile_sensor_data) 
         motor_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -53,22 +75,30 @@ class singleTh_container(Node):
 
         self.rgb_topic = '/net/color/image_rgb_compressed_2hz'
         self.depth_topic = '/net/depth/image_depth_compressed_2hz'
+        self.camera_info_topic = '/camera/color/camera_info'
         self.save_dir = os.path.expanduser('/home/yipeng/image_bridge_saved')
         self.flip_rgb,self.flip_depth = True, True
         self.flip_code = -1  # -1: both, 0: vertical, 1: horizontal
         self.bridge = CvBridge()
         self.image_viewer_scale = 1.0
         cv2.namedWindow("ILGP Viewer", cv2.WINDOW_NORMAL)
-        self.sub_rgb = self.create_subscription(CompressedImage, self.rgb_topic, self.rgb_callback, qos_profile_sensor_data)
-        self.sub_depth = self.create_subscription(CompressedImage, self.depth_topic, self.depth_callback, qos_profile_sensor_data)
+
+        self.vlm_idle = True
 
         self._teleop_timer = self.create_timer(0.1, self._teleop_timer_callback)
-        
+        self._image_viewer_timer = self.create_timer(0.1, self._image_viewer_timer_callback)
+
+        self._exec_thread = threading.Thread(target=self._exec_ilgp_process, daemon=True)
+        self._vlm_thread = threading.Thread(target=self._exec_vlm_process, daemon=True)
+
+        self._exec_thread.start()
+        self._vlm_thread.start()
+    
     
     def _teleop_timer_callback(self):
         self.publish_vel()
-        if self._teleop_base._trans_snapshot_trigger:
-            #TODO: trigger snapshot
+        if self._teleop_base._trans_snapshot_triggered:
+            # trigger snapshot
             if self._image_pool_ring is None:
                 self.get_logger().warn("Image pool ring is None")
                 return
@@ -78,8 +108,13 @@ class singleTh_container(Node):
             
             res = self._image_pool_ring.save_latest(self.save_dir)  # save latest image
             self.get_logger().info(f"Snapshot saved status: {res}")
-            self._teleop_base._trans_snapshot_trigger = False
-            
+            self._teleop_base._trans_snapshot_triggered = False
+
+        if self._teleop_base._trans_vlm_triggered:
+            # trigger VLM call
+            self._state = ILGP_State.TEST_VLM
+
+
     def _image_viewer_timer_callback(self):
         pack = self._image_pool_ring.get_latest(1)
         if pack is None or len(pack) == 0:
@@ -95,6 +130,8 @@ class singleTh_container(Node):
         
         cv2.imshow("ILGP Viewer", vis)
         cv2.waitKey(1)
+
+
     def joy_callback(self, msg: Joy):
         self._teleop_base.joy_update(msg)
 
@@ -168,4 +205,68 @@ class singleTh_container(Node):
         power_msg.state = MotorPower.STATE_ON if enable else MotorPower.STATE_OFF
         self.motor_pub.publish(power_msg)
 
-    
+
+    def _exec_vlm_process(self):
+        result_img = None
+        cv2.namedWindow("VLM Debug", cv2.WINDOW_NORMAL)
+        while rclpy.ok():
+            if self.vlm_idle:
+                if self._state == ILGP_State.TEST_VLM:
+                    self.vlm_idle = False
+                    packs = self._image_pool_ring.get_latest(4)
+                    if not packs:
+                        self.get_logger().warn("No images for VLM")
+                        return
+                    rgb_list = [p.image_color.copy() for p in packs]
+                    instruction =  input("Enter VLM instruction: ")
+                    res_raw = self.vlm_client.infer_vlm(instruction, rgb_list)
+                    self.get_logger().info(f"VLM infer result: {res_raw}")
+
+                    self.result_nav_info = nav_info(
+                        stamp_ns = packs[-1].stamp_ns,
+                        image_color = packs[-1].image_color,
+                        image_depth = packs[-1].image_depth,
+                        image_uv = res_raw.get('uv', (-1, -1))
+                    )
+
+                    result_img = rgb_list[-1].copy()
+                    cv2.circle(result_img, (res_raw['uv'][0], res_raw['uv'][1]), 10, (0,255,0), 2)
+                    
+                    self.vlm_idle = True
+                    self._state = ILGP_State.WAIT_TRIGGER
+
+                    try:
+                        T_map_from_cam = self.tf_buffer.lookup_transform("odom", "camera_link", rclpy.time.Time())
+                    except tf2_ros.LookupException:
+                        self.get_logger().warn("TF lookup failed for odom->camera_link")
+                        T_map_from_cam = None
+                        self.logger().warn("Skipping point computation due to missing TF")
+                        pass
+                    self.image_exta.process_uv_to_point(
+                        self.result_nav_info.image_uv,
+                        self.result_nav_info.image_depth,
+                        T_map_from_cam
+                    )
+                elif self._state == ILGP_State.INFER_VLM:
+                    self._state = ILGP_State.WAIT_TRIGGER
+                    pass
+                
+            cv2.imshow("VLM Debug", result_img)
+            key = cv2.waitKey(1)
+            if key == ord('q'):   # press q to quit
+                cv2.destroyAllWindows()
+
+            time.sleep(0.1)
+
+
+    def _exec_ilgp_process(self):
+        while rclpy.ok():
+            if self._state == ILGP_State.WAIT_TRIGGER:
+                pass  # TODO: wait for trigger
+            elif self._state == ILGP_State.PLAN_TRAJ:
+                pass  # TODO: plan trajectory
+            elif self._state == ILGP_State.Moving:
+                pass  # TODO: execute movement
+            time.sleep(0.1)
+
+        
