@@ -33,7 +33,7 @@ f"""
 
 class VLMClient:
     def __init__(self):
-        self.client = genai.Client(api_key="AIzaSyC_jK6Y2DNmiWZj1H-YEJeZeN1OnPnVQZc")
+        self.client = genai.Client(api_key=os.getenv("GENAI_API_KEY"))
         self.isIDLE = True
 
     def _build_contents(self, instruction: str, rgb_frames_bgr: list):
