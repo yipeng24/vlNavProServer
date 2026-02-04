@@ -5,11 +5,11 @@ from sensor_msgs.msg import Joy
 
 @dataclass
 class joy_enum:
-    A=0,B=1,X=2,Y=3,LB=4,RB=5,
-    BACK=6,START=7,POWER=8,L_STICK=9,R_STICK=10,
-    horizontal_L=0,vertical_L=1,
-    LT=2,horizontal_R=3,vertical_R=4,
-    RT=5
+    A,B,X,Y,LB,RB = 0,1,2,3,4,5
+    BACK,START,POWER,L_STICK,R_STICK = 6,7,8,9,10
+    horizontal_L,vertical_L = 0,1
+    horizontal_R,vertical_R = 2,3
+    LT,RT = 4,5
 
 
 class teleop_base:

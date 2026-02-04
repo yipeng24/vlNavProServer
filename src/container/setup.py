@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'ilgp_container = container.ilgp_container:main',
+            'container_node = container.singleTh_container:main'
         ],
     },
 )

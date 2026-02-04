@@ -56,9 +56,14 @@ class singleTh_container(Node):
         self._state: ILGP_State = ILGP_State.INIT
         self.result_nav_info: nav_info = None
 
+        self.rgb_topic = '/net/color/image_rgb_compressed_2hz'
+        self.depth_topic = '/net/depth/image_depth_compressed_2hz'
+        self.camera_info_topic = '/realsense2_camera/color/camera_info'
+        self.save_dir = os.path.expanduser('/home/yipeng/image_bridge_saved')
+
         self.nav_vel = Twist()
         self._sub_joy = self.create_subscription(Joy, "/joy", self.joy_callback, 10)
-        self._sub_nav = self.create_subscription(Twist, "/cmd_nav", self.nav_callback, 10)
+        self._sub_nav = self.create_subscription(Twist, "/cmd_vel_nav", self.nav_callback, 10)
         self.sub_rgb = self.create_subscription(CompressedImage, self.rgb_topic, self.rgb_callback, qos_profile_sensor_data)
         self.sub_depth = self.create_subscription(CompressedImage, self.depth_topic, self.depth_callback, qos_profile_sensor_data)
         self.sub_camera_info = self.create_subscription(CameraInfo, self.camera_info_topic, self.camera_info_callback, qos_profile_sensor_data) 
@@ -68,30 +73,31 @@ class singleTh_container(Node):
             reliability=ReliabilityPolicy.RELIABLE,
             durability=DurabilityPolicy.TRANSIENT_LOCAL,
         )
-        self.joy_pub = self.create_publisher(Twist, '/cmd_vel_nav', 10)
-        self.out_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        self.joy_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # self.out_pub = self.create_publisher(Twist, '/cmd_vel', 10)
         self.motor_pub = self.create_publisher(MotorPower, 'motor_power', motor_qos)
         self.set_motor_power(True)  # power on at start
 
-        self.rgb_topic = '/net/color/image_rgb_compressed_2hz'
-        self.depth_topic = '/net/depth/image_depth_compressed_2hz'
-        self.camera_info_topic = '/camera/color/camera_info'
-        self.save_dir = os.path.expanduser('/home/yipeng/image_bridge_saved')
         self.flip_rgb,self.flip_depth = True, True
         self.flip_code = -1  # -1: both, 0: vertical, 1: horizontal
         self.bridge = CvBridge()
         self.image_viewer_scale = 1.0
         cv2.namedWindow("ILGP Viewer", cv2.WINDOW_NORMAL)
 
-        self.vlm_idle = True
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
 
+        self.vlm_idle = True
+        self.result_img = None
         self._teleop_timer = self.create_timer(0.1, self._teleop_timer_callback)
         self._image_viewer_timer = self.create_timer(0.1, self._image_viewer_timer_callback)
 
         self._exec_thread = threading.Thread(target=self._exec_ilgp_process, daemon=True)
         self._vlm_thread = threading.Thread(target=self._exec_vlm_process, daemon=True)
 
-        self._exec_thread.start()
+        cv2.namedWindow("VLM Debug", cv2.WINDOW_NORMAL)
+        cv2.resizeWindow("VLM Debug", 640, 480)
+        # self._exec_thread.start()
         self._vlm_thread.start()
     
     
@@ -111,9 +117,10 @@ class singleTh_container(Node):
             self._teleop_base._trans_snapshot_triggered = False
 
         if self._teleop_base._trans_vlm_triggered:
+            self.get_logger().info("VLM inference triggered")
             # trigger VLM call
             self._state = ILGP_State.TEST_VLM
-
+            self._teleop_base._trans_vlm_triggered = False
 
     def _image_viewer_timer_callback(self):
         pack = self._image_pool_ring.get_latest(1)
@@ -122,13 +129,20 @@ class singleTh_container(Node):
             cv2.waitKey(1)
             return
         img_bgr = pack[0].rgb_bgr
+        
         vis = img_bgr.copy()
         cv2.putText(vis, f"stamp(ns): {pack[0].stamp_ns}", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
         cv2.putText(vis, f"ring: {self._image_pool_ring.size()}/{self._image_pool_ring.maxlen}", (10, 60),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+        cv2.putText(vis, f"{self._state}  |   vlnidle: {self.vlm_idle}", (10, 90),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
         
         cv2.imshow("ILGP Viewer", vis)
+        if self.result_img is not None:
+            cv2.imshow("VLM Debug", self.result_img)
+        # else:
+        #     cv2.imshow("VLM Debug", img_bgr)
         cv2.waitKey(1)
 
 
@@ -140,6 +154,10 @@ class singleTh_container(Node):
         self.nav_vel = msg
 
 
+    def camera_info_callback(self, msg: CameraInfo):
+        self.image_exta.update_camera_info(msg)
+
+
     def rgb_callback(self, msg: CompressedImage):
         try:
             bgr = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
@@ -148,7 +166,7 @@ class singleTh_container(Node):
             return
         if self.flip_rgb:
             bgr = cv2.flip(bgr, self.flip_code)
-        self.ring.update_rgb(stamp_to_ns(msg), bgr)
+        self._image_pool_ring.update_rgb(stamp_to_ns(msg), bgr)
 
 
     def depth_callback(self, msg: CompressedImage):
@@ -176,11 +194,11 @@ class singleTh_container(Node):
         if self.flip_depth:
             depth = cv2.flip(depth, self.flip_code)
 
-        self.ring.update_depth(stamp_to_ns(msg), depth)
+        self._image_pool_ring.update_depth(stamp_to_ns(msg), depth)
 
 
     def save_latest_to_disk(self, n: int = 1):
-        packs = self.ring.get_latest(n)
+        packs = self._image_pool_ring.get_latest(n)
         jpg_params = [int(cv2.IMWRITE_JPEG_QUALITY), 80]
         for p in packs:
             prefix = os.path.join(self.save_dir, f"{p.stamp_ns}")
@@ -202,35 +220,42 @@ class singleTh_container(Node):
 
     def set_motor_power(self, enable: bool):
         power_msg = MotorPower()
-        power_msg.state = MotorPower.STATE_ON if enable else MotorPower.STATE_OFF
+        power_msg.state = MotorPower.ON if enable else MotorPower.OFF
         self.motor_pub.publish(power_msg)
 
 
     def _exec_vlm_process(self):
-        result_img = None
-        cv2.namedWindow("VLM Debug", cv2.WINDOW_NORMAL)
+        self.vlm_idle = True
         while rclpy.ok():
             if self.vlm_idle:
-                if self._state == ILGP_State.TEST_VLM:
+                if self._state is ILGP_State.TEST_VLM:
                     self.vlm_idle = False
                     packs = self._image_pool_ring.get_latest(4)
                     if not packs:
                         self.get_logger().warn("No images for VLM")
                         return
-                    rgb_list = [p.image_color.copy() for p in packs]
-                    instruction =  input("Enter VLM instruction: ")
+                    rgb_list = [p.rgb_bgr.copy() for p in packs]
+
+                    instruction =  "go to the door"#input("input VLM instruction: ")
+                    self.get_logger().info(f"Sending VLM instruction: {instruction}")
+
                     res_raw = self.vlm_client.infer_vlm(instruction, rgb_list)
                     self.get_logger().info(f"VLM infer result: {res_raw}")
 
+                    if res_raw['ok'] is not True:
+                        continue
+
                     self.result_nav_info = nav_info(
                         stamp_ns = packs[-1].stamp_ns,
-                        image_color = packs[-1].image_color,
-                        image_depth = packs[-1].image_depth,
-                        image_uv = res_raw.get('uv', (-1, -1))
+                        image_color = packs[-1].rgb_bgr,
+                        image_depth = packs[-1].depth,
+                        image_uv = res_raw.get('uv', (-1, -1)),
+                        vlm_result = res_raw,
+                        local_map_waypoint = None
                     )
 
-                    result_img = rgb_list[-1].copy()
-                    cv2.circle(result_img, (res_raw['uv'][0], res_raw['uv'][1]), 10, (0,255,0), 2)
+                    self.result_img = rgb_list[-1].copy()
+                    cv2.circle(self.result_img, (res_raw['uv'][0], res_raw['uv'][1]), 10, (0,255,0), 2)
                     
                     self.vlm_idle = True
                     self._state = ILGP_State.WAIT_TRIGGER
@@ -240,21 +265,17 @@ class singleTh_container(Node):
                     except tf2_ros.LookupException:
                         self.get_logger().warn("TF lookup failed for odom->camera_link")
                         T_map_from_cam = None
-                        self.logger().warn("Skipping point computation due to missing TF")
-                        pass
+                        self.get_logger().warn("Skipping point computation due to missing TF")
+                        continue
                     self.image_exta.process_uv_to_point(
                         self.result_nav_info.image_uv,
                         self.result_nav_info.image_depth,
                         T_map_from_cam
                     )
-                elif self._state == ILGP_State.INFER_VLM:
+                elif self._state is ILGP_State.INFER_VLM:
                     self._state = ILGP_State.WAIT_TRIGGER
-                    pass
-                
-            cv2.imshow("VLM Debug", result_img)
-            key = cv2.waitKey(1)
-            if key == ord('q'):   # press q to quit
-                cv2.destroyAllWindows()
+                    continue
+                    
 
             time.sleep(0.1)
 
@@ -269,4 +290,16 @@ class singleTh_container(Node):
                 pass  # TODO: execute movement
             time.sleep(0.1)
 
-        
+
+def main():
+    rclpy.init()
+    node = singleTh_container()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()

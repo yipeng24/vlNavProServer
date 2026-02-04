@@ -38,24 +38,20 @@ def tf_to_matrix(T: TransformStamped):
 class image_exta:
     def __init__(self):
         super().__init__()
-        self.Kc = self.Dc = self.color_w = self.color_h = None
-        self.Kd = self.Dd = self.depth_w = self.depth_h = None
-        self.tf_buffer = tf2_ros.Buffer()
+        self.Kc  = self.color_w = self.color_h = None
 
 
     def update_camera_info(self, color_info, depth_info, msg: CameraInfo):
         if color_info is not None:
-            self.Kc, self.Dc, self.color_w, self.color_h = parse_camera_info(msg)
-        if depth_info is not None:
-            self.Kd, self.Dd, self.depth_w, self.depth_h = parse_camera_info(msg)
-        # process uv to point
+            self.Kc = np.array(color_info.k, dtype=np.float64).reshape(3, 3)
+            self.color_h, self.color_w = color_info.height, color_info.width
 
 
     def process_uv_to_point(self, uv, depth_img, T_map_from_cam: TransformStamped):
         u, v = uv
         z_raw = depth_img[v, u] * 0.001
         if z_raw <= 0:
-            self.get_logger().warn(f"No depth at pixel {uv}")
+            print(f"No depth at pixel {uv}")
             return
         
         Pc = deproject_pixel(self.Kc, u, v, z_raw)

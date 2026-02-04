@@ -13,3 +13,4 @@ bag
 wandb
 promts/apikey.txt
 .vln_venv/
+.env

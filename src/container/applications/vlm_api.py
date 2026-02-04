@@ -5,35 +5,41 @@ import time
 import json
 import re
 import cv2
-
+from dotenv import load_dotenv
 def build_prompt(size_wh, instruction: str) -> str:
     W, H = size_wh
     prompt = \
 f"""
-你现在是一个规划路径点的导航机器人。
-现在你要执行的指令是“{instruction}”。
+You are a path-planning navigation robot. 
+Your current task is to execute the instruction: "{instruction}".
 
-我给你参考的是现在四帧(旧的排在前, 第四张是最新)的图像，图像尺寸是 {W}x{H}。
-请你根据四帧的变化，选择“在第四张图像里”下一步应该到达的像素坐标(u,v)。
+### Input Context:
+- You are provided with 4 sequential image frames (Frame 1 is the oldest, Frame 4 is the latest).
+- Image Dimensions: Width = {W}, Height = {H}.
+- Your goal: Based on the temporal movement across these frames, select the next target pixel coordinate (u, v) in "Frame 4".
 
-要求：
-1) 输出的点必须在地面上（可行走区域），不能在墙上、门上、桌子等物体上，也不能在空中。
-2) u 范围 0-{W-1}，v 范围 0-{H-1}，必须是整数。
-3) 如果你认为这个指令已经完成：sta="finish"
-   如果你认为还需要继续走：sta="move"
-   如果你认为无法完成指令：sta="noway"
+### Strict Constraints:
+1. **Walkable Surface**: The point must be on the ground (navigable area). Do not place it on walls, ceilings, obstacles, or in the air.
+2. **Coordinate Boundaries**: 
+   - The u-coordinate must be an integer: 0 ≤ u ≤ {W-1}.
+   - The v-coordinate must be an integer: 0 ≤ v ≤ {H-1}.
+   - **CRITICAL**: If your calculated point is near the edge, you must clip it to ensure it does not exceed these maximum values (e.g., if W=640, u cannot be 640; it must be 639 or less).
+3. **Status Logic (sta)**:
+   - "finish": The instruction is fully completed.
+   - "move": Further movement is required to reach the goal.
+   - "noway": The instruction is impossible to fulfill from the current position.
 
-输出格式（只允许输出 JSON，不要输出任何解释文字）：
-{{"sta":"move","uv":"(u,v)"}}
+### Output Format:
+Output ONLY a valid JSON object. Do not include any conversational text or explanations.
 
-示例：
-{{"sta":"move","uv":"(123,123)"}}
+{{"sta": "move", "uv": "(u,v)"}}
 """
     return prompt.strip()
 
 class VLMClient:
     def __init__(self):
-        self.client = genai.Client(api_key=os.getenv("GENAI_API_KEY"))
+        load_dotenv()
+        self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
         self.isIDLE = True
 
     def _build_contents(self, instruction: str, rgb_frames_bgr: list):
@@ -88,7 +94,7 @@ class VLMClient:
         try:
             response = self.client.models.generate_content(
                 # model="gemini-robotics-er-1.5-preview",
-                model="gemini-2.5-flash-lite",
+                model="gemini-2.5-flash",
                 contents=contents,
                 # config=types.GenerateContentConfig(
                 #     temperature=0.2,
