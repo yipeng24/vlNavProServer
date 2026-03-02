@@ -132,7 +132,6 @@ if __name__ == "__main__":
     client = VLMClient()
     img_paths = [
         "vlNavProServer\\imgs\\go_out_of_the_door\\12.jpg",
-
     ]
     result = client.infer_vlm("go out of the door and into the corridor", [cv2.imread(p) for p in img_paths])
     print("Result:", result)

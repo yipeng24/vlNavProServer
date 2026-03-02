@@ -78,11 +78,13 @@ class singleTh_container(Node):
         self.motor_pub = self.create_publisher(MotorPower, 'motor_power', motor_qos)
         self.set_motor_power(True)  # power on at start
 
+        self.img4show = None
         self.flip_rgb,self.flip_depth = True, True
         self.flip_code = -1  # -1: both, 0: vertical, 1: horizontal
         self.bridge = CvBridge()
         self.image_viewer_scale = 1.0
         cv2.namedWindow("ILGP Viewer", cv2.WINDOW_NORMAL)
+        cv2.namedWindow("Viewer Current", cv2.WINDOW_NORMAL)
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
@@ -91,6 +93,7 @@ class singleTh_container(Node):
         self.result_img = None
         self._teleop_timer = self.create_timer(0.1, self._teleop_timer_callback)
         self._image_viewer_timer = self.create_timer(0.1, self._image_viewer_timer_callback)
+        
 
         self._exec_thread = threading.Thread(target=self._exec_ilgp_process, daemon=True)
         self._vlm_thread = threading.Thread(target=self._exec_vlm_process, daemon=True)
@@ -122,19 +125,15 @@ class singleTh_container(Node):
             self._state = ILGP_State.TEST_VLM
             self._teleop_base._trans_vlm_triggered = False
 
+
+    #展示当前图像
     def _image_viewer_timer_callback(self):
-        pack = self._image_pool_ring.get_latest(1)
-        if pack is None or len(pack) == 0:
-            self.get_logger().warn("No image pack available for viewing")
-            cv2.waitKey(1)
+        if self.img4show is None:
             return
-        img_bgr = pack[0].rgb_bgr
+
+        img_bgr = self.img4show 
         
         vis = img_bgr.copy()
-        cv2.putText(vis, f"stamp(ns): {pack[0].stamp_ns}", (10, 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
-        cv2.putText(vis, f"ring: {self._image_pool_ring.size()}/{self._image_pool_ring.maxlen}", (10, 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
         cv2.putText(vis, f"{self._state}  |   vlnidle: {self.vlm_idle}", (10, 90),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
         
@@ -144,6 +143,17 @@ class singleTh_container(Node):
         # else:
         #     cv2.imshow("VLM Debug", img_bgr)
         cv2.waitKey(1)
+
+        # pack = self._image_pool_ring.get_latest(1)
+        # if pack is None or len(pack) == 0:
+        #     self.get_logger().warn("No image pack available for viewing")
+        #     cv2.waitKey(1)
+        #     return
+
+        # cv2.putText(vis, f"stamp(ns): {pack[0].stamp_ns}", (10, 30),
+        #             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
+        # cv2.putText(vis, f"ring: {self._image_pool_ring.size()}/{self._image_pool_ring.maxlen}", (10, 60),
+        #             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
 
 
     def joy_callback(self, msg: Joy):
@@ -160,13 +170,13 @@ class singleTh_container(Node):
 
     def rgb_callback(self, msg: CompressedImage):
         try:
-            bgr = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            self.img4show = self.bridge.compressed_imgmsg_to_cv2(msg, desired_encoding='bgr8')
         except Exception as e:
             self.get_logger().warn(f"RGB cv_bridge failed: {e}")
             return
         if self.flip_rgb:
-            bgr = cv2.flip(bgr, self.flip_code)
-        self._image_pool_ring.update_rgb(stamp_to_ns(msg), bgr)
+            self.img4show = cv2.flip(self.img4show, self.flip_code)
+        self._image_pool_ring.update_rgb(stamp_to_ns(msg), self.img4show)
 
 
     def depth_callback(self, msg: CompressedImage):
@@ -229,14 +239,23 @@ class singleTh_container(Node):
         while rclpy.ok():
             if self.vlm_idle:
                 if self._state is ILGP_State.TEST_VLM:
+                    #1. 从图像池获取最近的4帧图像（如果有的话）
+                    packs = []
+                    if self._image_pool_ring.size() == 0:
+                        continue
+                    elif self._image_pool_ring.size() < 4:
+                        packs = self._image_pool_ring.get_latest(self._image_pool_ring.size())
+                    else:
+                        packs = self._image_pool_ring.get_latest(4)
+                    #2. 将图像送入VLM API进行推理
                     self.vlm_idle = False
-                    packs = self._image_pool_ring.get_latest(4)
                     if not packs:
                         self.get_logger().warn("No images for VLM")
-                        return
+                        continue
+
                     rgb_list = [p.rgb_bgr.copy() for p in packs]
 
-                    instruction =  "go to the door"#input("input VLM instruction: ")
+                    instruction =  "go to the door" # input("input VLM instruction: ")
                     self.get_logger().info(f"Sending VLM instruction: {instruction}")
 
                     res_raw = self.vlm_client.infer_vlm(instruction, rgb_list)
