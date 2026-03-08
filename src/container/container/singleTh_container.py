@@ -294,7 +294,7 @@ class singleTh_container(Node):
                 elif self._state is ILGP_State.INFER_VLM:
                     self._state = ILGP_State.WAIT_TRIGGER
                     continue
-                    
+
 
             time.sleep(0.1)
 

@@ -1,8 +1,10 @@
-import math
-
-from nav_msgs.msg import Odometry
-from geometry_msgs.msg import PoseStamped
+import rclpy
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.action import ActionClient
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import Odometry
+from nav2_msgs.action import NavigateToPose
+import math
 
 DEPTH_SCALE = 0.001
 
@@ -14,9 +16,10 @@ def yaw_from_quat(q):
 class WaypointClient():
     def __init__(self):
         super().__init__("waypoint_client")
+        self.node = rclpy.create_node("waypoint_logic_node")
         self.odom_topic = "/odom"
         self.odom_frame = "odom"
         self.base_frame = "base_footprint"
 
-        self.fx, self.fy = 525.0, 525.0
-        self.cx, self.cy = 319.5, 239.5
+
+
