@@ -1,7 +1,9 @@
 from dataclasses import dataclass
 from enum import Enum, auto
+import math
 import os
 import time
+from std_msgs.msg import String
 import cv2
 import numpy as np
 import rclpy
@@ -9,17 +11,19 @@ import tf2_ros
 
 import threading
 
+from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, HistoryPolicy, ReliabilityPolicy, DurabilityPolicy,qos_profile_sensor_data
 
 from sensor_msgs.msg import Joy, CameraInfo, CompressedImage
-from geometry_msgs.msg import Twist
+from geometry_msgs.msg import Twist,Pose2D
 from kobuki_ros_interfaces.msg import MotorPower
 from cv_bridge import CvBridge
 
 from applications.teleop_base import teleop_base
 from applications.buffer import ImageRingBuffer
-from applications.vlm_api import VLMClient
+# from applications.vlm_api import VLMClient
+from applications.vlm_openai_api import VLMClient
 from applications.image_exta import image_exta
 
 def stamp_to_ns(msg: CompressedImage) -> int:
@@ -61,12 +65,35 @@ class singleTh_container(Node):
         self.camera_info_topic = '/realsense2_camera/color/camera_info'
         self.save_dir = os.path.expanduser('/home/yipeng/image_bridge_saved')
 
+        self.bridge_goal_topic = '/top/goal_pose2d'
+        self.bridge_status_topic = '/top/nav_status'
+        self.bridge_feedback_topic = '/top/nav_feedback'
+        self.bridge_result_topic = '/top/nav_result'
+
+        self.latest_nav_status = ''
+        self.latest_nav_feedback = ''
+        self.latest_nav_result = ''
+        self.last_sent_goal = None
+
         self.nav_vel = Twist()
         self._sub_joy = self.create_subscription(Joy, "/joy", self.joy_callback, 10)
         self._sub_nav = self.create_subscription(Twist, "/cmd_vel_nav", self.nav_callback, 10)
         self.sub_rgb = self.create_subscription(CompressedImage, self.rgb_topic, self.rgb_callback, qos_profile_sensor_data)
         self.sub_depth = self.create_subscription(CompressedImage, self.depth_topic, self.depth_callback, qos_profile_sensor_data)
         self.sub_camera_info = self.create_subscription(CameraInfo, self.camera_info_topic, self.camera_info_callback, qos_profile_sensor_data) 
+        
+        self.bridge_goal_pub = self.create_publisher(Pose2D, self.bridge_goal_topic, 10)
+
+        self.bridge_status_sub = self.create_subscription(
+            String, self.bridge_status_topic, self.bridge_status_callback, 10
+        )
+        self.bridge_feedback_sub = self.create_subscription(
+            String, self.bridge_feedback_topic, self.bridge_feedback_callback, 10
+        )
+        self.bridge_result_sub = self.create_subscription(
+            String, self.bridge_result_topic, self.bridge_result_callback, 10
+        )
+
         motor_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
@@ -79,15 +106,29 @@ class singleTh_container(Node):
         self.set_motor_power(True)  # power on at start
 
         self.img4show = None
+        self.latest_rgb_for_vlm = None
+        self.latest_rgb_stamp_ns = None
         self.flip_rgb,self.flip_depth = True, True
         self.flip_code = -1  # -1: both, 0: vertical, 1: horizontal
         self.bridge = CvBridge()
         self.image_viewer_scale = 1.0
         cv2.namedWindow("ILGP Viewer", cv2.WINDOW_NORMAL)
-        cv2.namedWindow("Viewer Current", cv2.WINDOW_NORMAL)
+        # cv2.namedWindow("Viewer Current", cv2.WINDOW_NORMAL)
 
         self.tf_buffer = tf2_ros.Buffer()
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self.declare_parameter('goal_frame', 'map')
+        self.declare_parameter('camera_frame', '')
+        self.declare_parameter('base_frame', 'base_footprint')
+        self.goal_frame = str(self.get_parameter('goal_frame').value)
+        configured_camera_frame = str(self.get_parameter('camera_frame').value).strip()
+        self.camera_frame = configured_camera_frame if configured_camera_frame else None
+        self.base_frame = str(self.get_parameter('base_frame').value)
+        self.get_logger().info(
+            f"Goal TF config: goal_frame={self.goal_frame}, "
+            f"camera_frame={self.camera_frame or '<from CameraInfo>'}, "
+            f"base_frame={self.base_frame}"
+        )
 
         self.vlm_idle = True
         self.result_img = None
@@ -131,13 +172,51 @@ class singleTh_container(Node):
         if self.img4show is None:
             return
 
-        img_bgr = self.img4show 
-        
+        img_bgr = self.img4show
         vis = img_bgr.copy()
-        cv2.putText(vis, f"{self._state}  |   vlnidle: {self.vlm_idle}", (10, 90),
+
+        if self._image_pool_ring is not None:
+            cv2.putText(vis, f"ring: {self._image_pool_ring.size()}/{self._image_pool_ring.maxlen}", (10, 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2) 
+
+        cv2.putText(vis, f"{self._state}  |   vlnIdle: {self.vlm_idle}", (10, 90),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0,0,255), 2)
         
-        cv2.imshow("ILGP Viewer", vis)
+        cv2.putText(vis, f"nav_status: {self.latest_nav_status}", (10, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,0), 2)
+
+        cv2.putText(vis, f"nav_result: {self.latest_nav_result}", (10, 150),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,0,0), 2)
+
+        # Build a single-row history preview (4 frames) and merge into ILGP Viewer.
+        h, w = vis.shape[:2]
+        thumb_h = max(80, h // 5)
+        thumb_w = max(120, w // 4)
+
+        history_frames = []
+        if self._image_pool_ring is not None and self._image_pool_ring.size() > 0:
+            history_frames = [p.rgb_bgr for p in self._image_pool_ring.get_latest(4)]
+
+        # Keep left->right as old->new, pad with empty images on the left when missing.
+        padded_frames = [None] * (4 - len(history_frames)) + history_frames
+
+        thumbs = []
+        for frame in padded_frames:
+            if frame is None:
+                thumb = np.zeros((thumb_h, thumb_w, 3), dtype=np.uint8)
+            else:
+                if frame.ndim == 2:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+                thumb = cv2.resize(frame, (thumb_w, thumb_h), interpolation=cv2.INTER_AREA)
+            thumbs.append(thumb)
+
+        history_strip = np.hstack(thumbs)
+        history_strip = cv2.resize(history_strip, (w, thumb_h), interpolation=cv2.INTER_AREA)
+        cv2.putText(history_strip, "history x4 (old -> new)", (10, 22),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
+
+        merged = np.vstack([vis, history_strip])
+        cv2.imshow("ILGP Viewer", merged)
         if self.result_img is not None:
             cv2.imshow("VLM Debug", self.result_img)
         # else:
@@ -166,6 +245,11 @@ class singleTh_container(Node):
 
     def camera_info_callback(self, msg: CameraInfo):
         self.image_exta.update_camera_info(msg)
+        if self.camera_frame is None and msg.header.frame_id:
+            self.camera_frame = msg.header.frame_id
+            self.get_logger().info(
+                f"Using camera frame from CameraInfo: {self.camera_frame}"
+            )
 
 
     def rgb_callback(self, msg: CompressedImage):
@@ -176,7 +260,10 @@ class singleTh_container(Node):
             return
         if self.flip_rgb:
             self.img4show = cv2.flip(self.img4show, self.flip_code)
-        self._image_pool_ring.update_rgb(stamp_to_ns(msg), self.img4show)
+
+        # Cache latest RGB, and only push to ring when VLM is triggered.
+        self.latest_rgb_for_vlm = self.img4show.copy()
+        self.latest_rgb_stamp_ns = stamp_to_ns(msg)
 
 
     def depth_callback(self, msg: CompressedImage):
@@ -234,19 +321,61 @@ class singleTh_container(Node):
         self.motor_pub.publish(power_msg)
 
 
+    def bridge_status_callback(self, msg: String):
+        self.latest_nav_status = msg.data
+        self.get_logger().info(f"[bridge status] {msg.data}")
+
+
+    def bridge_feedback_callback(self, msg: String):
+        self.latest_nav_feedback = msg.data
+        self.get_logger().info(f"[bridge feedback] {msg.data}")
+
+
+    def bridge_result_callback(self, msg: String):
+        self.latest_nav_result = msg.data
+        self.get_logger().info(f"[bridge result] {msg.data}")
+
+
+    def publish_goal_to_bridge(self, x: float, y: float, yaw: float):
+        msg = Pose2D()
+        msg.x = float(x)
+        msg.y = float(y)
+        msg.theta = float(yaw)
+
+        self.bridge_goal_pub.publish(msg)
+        self.last_sent_goal = (msg.x, msg.y, msg.theta)
+
+        self.get_logger().info(
+            f"[bridge goal pub] x={msg.x:.3f}, y={msg.y:.3f}, yaw={msg.theta:.3f}"
+        )
+
+
     def _exec_vlm_process(self):
         self.vlm_idle = True
         while rclpy.ok():
             if self.vlm_idle:
                 if self._state is ILGP_State.TEST_VLM:
+                    if self.latest_rgb_for_vlm is None or self.latest_rgb_stamp_ns is None:
+                        self.get_logger().warn("No cached RGB available for VLM trigger")
+                        self._state = ILGP_State.WAIT_TRIGGER
+                        continue
+
+                    # Push RGB into ring only at VLM trigger time.
+                    self._image_pool_ring.update_rgb(
+                        self.latest_rgb_stamp_ns,
+                        self.latest_rgb_for_vlm
+                    )
+
                     #1. 从图像池获取最近的4帧图像（如果有的话）
                     packs = []
                     if self._image_pool_ring.size() == 0:
+                        self.get_logger().warn("No synced RGB/Depth pack after VLM-triggered RGB push")
+                        self._state = ILGP_State.WAIT_TRIGGER
                         continue
-                    elif self._image_pool_ring.size() < 4:
-                        packs = self._image_pool_ring.get_latest(self._image_pool_ring.size())
+                    elif self._image_pool_ring.size() >= 10:
+                        packs = self._image_pool_ring.get_latest(10)
                     else:
-                        packs = self._image_pool_ring.get_latest(4)
+                        packs = self._image_pool_ring.get_latest(self._image_pool_ring.size())
                     #2. 将图像送入VLM API进行推理
                     self.vlm_idle = False
                     if not packs:
@@ -263,7 +392,7 @@ class singleTh_container(Node):
 
                     if res_raw['ok'] is not True:
                         continue
-
+                    # 3. 将VLM结果、图像和深度等信息打包，并计算目标点在地图坐标系中的位置
                     self.result_nav_info = nav_info(
                         stamp_ns = packs[-1].stamp_ns,
                         image_color = packs[-1].rgb_bgr,
@@ -272,25 +401,65 @@ class singleTh_container(Node):
                         vlm_result = res_raw,
                         local_map_waypoint = None
                     )
-
+                    
                     self.result_img = rgb_list[-1].copy()
                     cv2.circle(self.result_img, (res_raw['uv'][0], res_raw['uv'][1]), 10, (0,255,0), 2)
                     
                     self.vlm_idle = True
                     self._state = ILGP_State.WAIT_TRIGGER
 
+                    if self.camera_frame is None:
+                        self.get_logger().warn("Skipping point computation because camera_frame is not available yet")
+                        continue
                     try:
-                        T_map_from_cam = self.tf_buffer.lookup_transform("odom", "camera_link", rclpy.time.Time())
-                    except tf2_ros.LookupException:
-                        self.get_logger().warn("TF lookup failed for odom->camera_link")
-                        T_map_from_cam = None
+                        T_goal_from_cam = self.tf_buffer.lookup_transform(
+                            self.goal_frame,
+                            self.camera_frame,
+                            rclpy.time.Time(),
+                            timeout=Duration(seconds=0.2)
+                        )
+                    except tf2_ros.TransformException as e:
+                        self.get_logger().warn(
+                            f"TF lookup failed for {self.goal_frame}->{self.camera_frame}: {e}"
+                        )
+                        T_goal_from_cam = None
                         self.get_logger().warn("Skipping point computation due to missing TF")
                         continue
-                    self.image_exta.process_uv_to_point(
+                    pt_map = self.image_exta.process_uv_to_point(
                         self.result_nav_info.image_uv,
                         self.result_nav_info.image_depth,
-                        T_map_from_cam
+                        T_goal_from_cam
                     )
+
+                    if pt_map is None:
+                        self.get_logger().warn("process_uv_to_point returned None")
+                        continue
+
+                    # 兼容 (x, y) / (x, y, z)
+                    goal_x = float(pt_map[0])
+                    goal_y = float(pt_map[1])
+
+                    # 在目标坐标系中，让机器人朝向目标点
+                    try:
+                        T_goal_from_base = self.tf_buffer.lookup_transform(
+                            self.goal_frame,
+                            self.base_frame,
+                            rclpy.time.Time(),
+                            timeout=Duration(seconds=0.2)
+                        )
+                        base_x = float(T_goal_from_base.transform.translation.x)
+                        base_y = float(T_goal_from_base.transform.translation.y)
+                        yaw = math.atan2(goal_y - base_y, goal_x - base_x)
+                    except tf2_ros.TransformException as e:
+                        self.get_logger().warn(
+                            f"TF lookup failed for {self.goal_frame}->{self.base_frame}, "
+                            f"fallback yaw uses origin. detail: {e}"
+                        )
+                        yaw = math.atan2(goal_y, goal_x)
+
+                    self.result_nav_info.local_map_waypoint = (goal_x, goal_y)
+
+                    self.publish_goal_to_bridge(goal_x, goal_y, yaw)
                 elif self._state is ILGP_State.INFER_VLM:
                     self._state = ILGP_State.WAIT_TRIGGER
                     continue

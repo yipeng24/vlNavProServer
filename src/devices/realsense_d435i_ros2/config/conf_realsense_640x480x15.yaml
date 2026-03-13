@@ -1,0 +1,24 @@
+realsense2_camera:
+  ros__parameters:
+    enable_color: true
+    enable_depth: true
+    enable_infra1: false
+    enable_infra2: false
+    enable_gyro: false
+    enable_accel: false
+    pointcloud.enable: false
+
+    # === 固定分辨率 + 帧率 ===
+    color_width: 640
+    color_height: 480      # 如果不支持，改成 480
+    color_fps: 15
+
+    depth_width: 640
+    depth_height: 480      # 如果不支持，改成 480
+    depth_fps: 15
+
+    # 同步（可选，VIO/对齐时有用）
+    enable_sync: true
+
+    # 对齐（可选：让 depth 对齐到 color）
+    align_depth.enable: false

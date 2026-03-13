@@ -1,0 +1,39 @@
+slam_toolbox:
+  ros__parameters:
+    use_sim_time: false
+
+    # qos_overrides:
+    #   /scan:
+    #     subscription:
+    #       reliability: reliable
+    # TF / topic 相关
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_footprint #base_link 如果你用 base_footprint，就改这个
+    scan_topic: /scan          # RPLIDAR C1 默认发布的
+
+    mode: mapping              # 先做建图，后面可以改 localization
+
+    scan_queue_size: 1            # async 必须建议=1 :contentReference[oaicite:3]{index=3}
+
+    # 这里先用里程计做 SLAM，有 Kobuki 的轮式里程计
+    use_odometry: true
+    provide_odom_frame: false  # 你的里程计已经提供 odom->base_link，就不用 slam 再造一个
+    use_scan_matching: true
+    use_scan_barycenter: true
+
+    # 一些比较稳的默认值
+    map_update_interval: 2.0
+    resolution: 0.05           # 5cm 栅格
+    max_laser_range: 10.0      # C1 的最大 12m，可以适当留点余量
+    minimum_time_interval: 0.5
+    transform_publish_period: 0.02
+    tf_buffer_duration: 30.0
+
+    # 解算器（直接用默认 Ceres）
+    solver_plugin: solver_plugins::CeresSolver
+    ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
+    ceres_preconditioner: SCHUR_JACOBI
+    ceres_trust_strategy: LEVENBERG_MARQUARDT
+    ceres_dogleg_type: TRADITIONAL_DOGLEG
+    ceres_loss_function: None

@@ -10,8 +10,13 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        ('share/' + package_name, ['launch/container.launch.py']),
     ],
-    install_requires=['setuptools'],
+    install_requires=[
+        'setuptools',
+        'openai',
+        'python-dotenv',
+    ],
     zip_safe=True,
     maintainer='yipeng',
     maintainer_email='gouyipeng24@gmail.com',
@@ -24,7 +29,9 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'container_node = container.singleTh_container:main'
+            'container_node = container.singleTh_container:main',
+            "waypoint_client = container.waypoint_client:main",
+            "bridge_node = container.bridge_node:main",
         ],
     },
 )

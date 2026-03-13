@@ -10,29 +10,68 @@ def build_prompt(size_wh, instruction: str) -> str:
     W, H = size_wh
     prompt = \
 f"""
-You are a path-planning navigation robot. 
-Your current task is to execute the instruction: "{instruction}".
+You are a waypoint decision module for instruction-guided visual navigation.
 
-### Input Context:
-- You are provided with 4 sequential image frames (Frame 1 is the oldest, Frame 4 is the latest).
-- Image Dimensions: Width = {W}, Height = {H}.
-- Your goal: Based on the temporal movement across these frames, select the next target pixel coordinate (u, v) in "Frame 4".
+Instruction:
+"{instruction}"
 
-### Strict Constraints:
-1. **Walkable Surface**: The point must be on the ground (navigable area). Do not place it on walls, ceilings, obstacles, or in the air.
-2. **Coordinate Boundaries**: 
-   - The u-coordinate must be an integer: 0 ≤ u ≤ {W-1}.
-   - The v-coordinate must be an integer: 0 ≤ v ≤ {H-1}.
-   - **CRITICAL**: If your calculated point is near the edge, you must clip it to ensure it does not exceed these maximum values (e.g., if W=640, u cannot be 640; it must be 639 or less).
-3. **Status Logic (sta)**:
-   - "finish": The instruction is fully completed.
-   - "move": Further movement is required to reach the goal.
-   - "noway": The instruction is impossible to fulfill from the current position.
+Input:
+- 4 sequential egocentric RGB frames (Frame 1 oldest, Frame 4 latest)
+- Frame size: {W} x {H}
 
-### Output Format:
-Output ONLY a valid JSON object. Do not include any conversational text or explanations.
+Goal:
+Predict the next local target pixel (u, v) in Frame 4, or determine that the instruction is already completed or currently impossible.
 
-{{"sta": "move", "uv": "(u,v)"}}
+You must jointly use:
+1. the instruction semantics,
+2. the temporal change across all 4 frames,
+3. the visible scene structure in Frame 4.
+
+## Decision Process
+First determine one of three states:
+- "finish": the instructed subtask has already been visually completed,
+- "move": the robot should continue moving,
+- "noway": the instructed subtask is impossible from the current visual scene.
+
+## Waypoint policy
+If state is "move", the target pixel must satisfy all of the following:
+- on visible walkable floor,
+- locally reachable in the next step,
+- advances the instruction,
+- temporally consistent with the robot's recent motion,
+- avoids obstacles, walls, furniture, door panels, and image borders,
+- prefers safe, central, stable floor regions.
+
+The target should be a LOCAL waypoint, not a final destination.
+
+## Conservative finish rule
+Only output "finish" if the instruction is truly completed in the latest visual state.
+Seeing the goal is not enough.
+Facing the goal is not enough.
+Partially entering the goal region is not enough unless the action is clearly completed.
+
+## noway rule
+Only output "noway" if there is clear visual evidence that the instruction cannot be executed from here.
+
+## Coordinate constraints
+- u, v must be integers
+- 0 <= u <= {W-1}
+- 0 <= v <= {H-1}
+- clip to valid range if necessary
+
+## Output
+Return exactly one JSON object and nothing else:
+
+{{"sta":"finish","uv":"(-1,-1)","reason":"..."}}
+or
+{{"sta":"move","uv":"(u,v)","reason":"..."}}
+or
+{{"sta":"noway","uv":"(-1,-1)","reason":"..."}}
+
+The reason must briefly mention:
+- what visual evidence you used,
+- why the state is correct,
+- why the chosen point is the best next local floor target if moving.
 """
     return prompt.strip()
 
@@ -75,7 +114,7 @@ class VLMClient:
         sta = obj.get("sta", None)
         uv = None
         if "uv" in obj:
-            m2 = re.search(r"\(\s*(\d+)\s*,\s*(\d+)\s*\)", str(obj["uv"]))
+            m2 = re.search(r"\(\s*(-?\d+)\s*,\s*(-?\d+)\s*\)", str(obj["uv"]))
             if m2:
                 uv = (int(m2.group(1)), int(m2.group(2)))
         elif "u" in obj and "v" in obj:
@@ -105,6 +144,8 @@ class VLMClient:
 
             raw_text = getattr(response, "text", "") or ""
             sta, uv = self._parse_sta_uv(raw_text)
+            if uv is None and sta == "finish":
+                uv = (-1, -1)
             if uv is None:
                 return {
                     "ok": False, "sta": sta, "uv": None, "elapsed_s": elapsed_s, "raw_text": raw_text, "error": "failed to parse uv",
@@ -130,8 +171,25 @@ class VLMClient:
 
 if __name__ == "__main__":
     client = VLMClient()
+
     img_paths = [
-        "vlNavProServer\\imgs\\go_out_of_the_door\\12.jpg",
+        "~/projects/vlNavProServer/imgs/go_out_of_the_door/03.jpg",
+        "~/projects/vlNavProServer/imgs/go_out_of_the_door/04.jpg",
+        "~/projects/vlNavProServer/imgs/go_out_of_the_door/05.jpg",
+        "~/projects/vlNavProServer/imgs/go_out_of_the_door/10.jpg",
     ]
-    result = client.infer_vlm("go out of the door and into the corridor", [cv2.imread(p) for p in img_paths])
+
+    img_paths = [os.path.expanduser(p) for p in img_paths]
+
+    frames = []
+    for p in img_paths:
+        img = cv2.imread(p)
+        if img is None:
+            raise FileNotFoundError(f"Failed to read image: {p}")
+        frames.append(img)
+
+    result = client.infer_vlm(
+        "go out of the door and into the corridor",
+        frames
+    )
     print("Result:", result)

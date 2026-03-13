@@ -1,0 +1,10 @@
+services:
+  kobuki:
+    build:
+      dockerfile: Dockerfile
+    command: ros2 launch kobuki kobuki.launch.py
+    restart: unless-stopped
+    privileged: true
+    network_mode: host
+    volumes:
+      - /dev:/dev

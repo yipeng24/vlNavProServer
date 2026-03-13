@@ -1,0 +1,22 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>kobuki_nav</name>
+  <version>0.0.1</version>
+  <description>SLAM and navigation launch/config for Kobuki with RPLIDAR.</description>
+
+  <maintainer email="yipeng24@gmail.com">Yipeng</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <!-- 构建工具 -->
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- 运行期依赖：用到的节点 / launch 库 -->
+  <exec_depend>slam_toolbox</exec_depend>
+  <exec_depend>sllidar_ros2</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>

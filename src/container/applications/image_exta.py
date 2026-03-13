@@ -41,10 +41,10 @@ class image_exta:
         self.Kc  = self.color_w = self.color_h = None
 
 
-    def update_camera_info(self, color_info, depth_info, msg: CameraInfo):
-        if color_info is not None:
-            self.Kc = np.array(color_info.k, dtype=np.float64).reshape(3, 3)
-            self.color_h, self.color_w = color_info.height, color_info.width
+    def update_camera_info(self, msg: CameraInfo):
+        if msg is not None:
+            self.Kc = np.array(msg.k, dtype=np.float64).reshape(3, 3)
+            self.color_h, self.color_w = msg.height, msg.width
 
 
     def process_uv_to_point(self, uv, depth_img, T_map_from_cam: TransformStamped):
