@@ -42,13 +42,11 @@ class nav_info:
 @dataclass
 class ILGP_State(Enum):
     INIT = auto(),
-    TEST_VLM = auto(),
-    WAIT_TRIGGER = auto(),
-    INFER_VLM = auto(),
-    PLAN_TRAJ = auto(),
-    Moving = auto(),
+    WAIT_TRIGGER = auto(), # 中间挂起状态
+    INFER_VLM = auto(),    # 进行VLM推理
+    Moving = auto(),       
 
-
+USER_INSTRUCTION = "go straight and turn right, then go straight to the white trash can and stop there"
 class singleTh_container(Node):
     def __init__(self):
         super().__init__("singleTh_container")
@@ -59,11 +57,21 @@ class singleTh_container(Node):
         self.image_exta: image_exta = image_exta()
         self._state: ILGP_State = ILGP_State.INIT
         self.result_nav_info: nav_info = None
+        self.pending_goal_pose: tuple[float, float, float] | None = None
+        self.vlm_result_ready = False
+        self._vlm_request_pending = False
+        self.nav_goal_dispatched = False
+        self._moving_wait_logged = False
+        self._infer_wait_logged = False
+        self._last_logged_state: ILGP_State | None = None
+        self._last_nav_takeover_logged: bool | None = None
 
         self.rgb_topic = '/net/color/image_rgb_compressed_2hz'
         self.depth_topic = '/net/depth/image_depth_compressed_2hz'
         self.camera_info_topic = '/realsense2_camera/color/camera_info'
         self.save_dir = os.path.expanduser('/home/yipeng/image_bridge_saved')
+        os.makedirs(self.save_dir, exist_ok=True)
+        self.vlm_raw_text_log_path = os.path.join(self.save_dir, 'vlm_raw_text.log')
 
         self.bridge_goal_topic = '/top/goal_pose2d'
         self.bridge_status_topic = '/top/nav_status'
@@ -73,7 +81,9 @@ class singleTh_container(Node):
         self.latest_nav_status = ''
         self.latest_nav_feedback = ''
         self.latest_nav_result = ''
+        self._last_logged_nav_status: str | None = None
         self.last_sent_goal = None
+        self._last_nav_vel_rx_monotonic = 0.0
 
         self.nav_vel = Twist()
         self._sub_joy = self.create_subscription(Joy, "/joy", self.joy_callback, 10)
@@ -131,6 +141,7 @@ class singleTh_container(Node):
         )
 
         self.vlm_idle = True
+        self.ensure_nav2 = False
         self.result_img = None
         self._teleop_timer = self.create_timer(0.1, self._teleop_timer_callback)
         self._image_viewer_timer = self.create_timer(0.1, self._image_viewer_timer_callback)
@@ -141,9 +152,55 @@ class singleTh_container(Node):
 
         cv2.namedWindow("VLM Debug", cv2.WINDOW_NORMAL)
         cv2.resizeWindow("VLM Debug", 640, 480)
-        # self._exec_thread.start()
+        self._exec_thread.start()
         self._vlm_thread.start()
     
+    def _queue_vlm_inference(self):
+        self.result_nav_info = None
+        self.pending_goal_pose = None
+        self.vlm_result_ready = False
+        self.nav_goal_dispatched = False
+        self._moving_wait_logged = False
+        self._infer_wait_logged = False
+        self.latest_nav_status = ''
+        self.latest_nav_feedback = ''
+        self.latest_nav_result = ''
+        self._vlm_request_pending = True
+        self._state = ILGP_State.INFER_VLM
+
+
+    def _log_vlm_raw_text(self, res_raw: dict):
+        raw_text = ""
+        sta_text = ""
+        error_text = ""
+        if isinstance(res_raw, dict):
+            raw_text = str(res_raw.get("raw_text", "") or "").strip()
+            sta_text = str(res_raw.get("sta", "") or "").strip()
+            error_text = str(res_raw.get("error", "") or "").strip()
+
+        header_parts = [time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())]
+        if sta_text:
+            header_parts.append(f"sta={sta_text}")
+        if error_text:
+            header_parts.append(f"error={error_text}")
+
+        text_to_store = raw_text if raw_text else "<empty>"
+        try:
+            with open(self.vlm_raw_text_log_path, "a", encoding="utf-8") as f:
+                f.write(f"[{' | '.join(header_parts)}]\n{text_to_store}\n\n")
+        except OSError as e:
+            self.get_logger().warn(f"Failed to write VLM raw_text log to {self.vlm_raw_text_log_path}: {e}")
+
+        if raw_text:
+            self.get_logger().info(f"[VLM raw_text]\n{raw_text}")
+            return
+
+        if error_text:
+            self.get_logger().info(f"[VLM raw_text] <empty> error={error_text}")
+            return
+
+        self.get_logger().info("[VLM raw_text] <empty>")
+
     
     def _teleop_timer_callback(self):
         self.publish_vel()
@@ -159,12 +216,20 @@ class singleTh_container(Node):
             res = self._image_pool_ring.save_latest(self.save_dir)  # save latest image
             self.get_logger().info(f"Snapshot saved status: {res}")
             self._teleop_base._trans_snapshot_triggered = False
+            if self.result_img is not None:
+                snapshot_path = os.path.join(self.save_dir, f"vlm_result_{self._image_pool_ring.size()}.jpg")
+                cv2.imwrite(snapshot_path, self.result_img)
+                self.get_logger().info(f"Snapshot result image saved to {snapshot_path}")
 
         if self._teleop_base._trans_vlm_triggered:
             self.get_logger().info("VLM inference triggered")
-            # trigger VLM call
-            self._state = ILGP_State.TEST_VLM
+            self._queue_vlm_inference()
             self._teleop_base._trans_vlm_triggered = False
+
+        if self._teleop_base._ensure_nav_triggered:
+            self.get_logger().info("Ensure Nav2 triggered by teleop")
+            self.ensure_nav2 = True 
+            self._teleop_base._ensure_nav_triggered = False
 
 
     #展示当前图像
@@ -237,10 +302,36 @@ class singleTh_container(Node):
 
     def joy_callback(self, msg: Joy):
         self._teleop_base.joy_update(msg)
+        if self._teleop_base._trans_use_nav != self._last_nav_takeover_logged:
+            mode = "Nav2 /cmd_vel_nav passthrough" if self._teleop_base._trans_use_nav else "manual joystick cmd_vel"
+            self.get_logger().info(
+                f"Velocity control mode -> {mode}; buttons={list(msg.buttons)} axes={list(msg.axes)}"
+            )
+            self._last_nav_takeover_logged = self._teleop_base._trans_use_nav
+            if self._teleop_base._trans_use_nav:
+                self.joy_pub.publish(self.nav_vel)
+        if self._teleop_base._call_vlm_button_pressed:
+            self.get_logger().info(
+                f"LB edge detected: buttons={list(msg.buttons)} axes={list(msg.axes)}"
+            )
+        if self._teleop_base._ensure_nav_button_pressed:
+            self.get_logger().info("Y edge detected: ensure_nav2 requested")
+        if self._teleop_base.snapshot_button_pressed:
+            self.get_logger().info("B edge detected: snapshot requested")
 
 
     def nav_callback(self, msg: Twist):
-        self.nav_vel = msg
+        self.nav_vel = Twist()
+        self.nav_vel.linear.x = msg.linear.x
+        self.nav_vel.linear.y = msg.linear.y
+        self.nav_vel.linear.z = msg.linear.z
+        self.nav_vel.angular.x = msg.angular.x
+        self.nav_vel.angular.y = msg.angular.y
+        self.nav_vel.angular.z = msg.angular.z
+        self._last_nav_vel_rx_monotonic = time.monotonic()
+
+        if self._teleop_base._trans_use_nav:
+            self.joy_pub.publish(self.nav_vel)
 
 
     def camera_info_callback(self, msg: CameraInfo):
@@ -323,7 +414,9 @@ class singleTh_container(Node):
 
     def bridge_status_callback(self, msg: String):
         self.latest_nav_status = msg.data
-        self.get_logger().info(f"[bridge status] {msg.data}")
+        if msg.data != self._last_logged_nav_status:
+            self.get_logger().info(f"[bridge status] {msg.data}")
+            self._last_logged_nav_status = msg.data
 
 
     def bridge_feedback_callback(self, msg: String):
@@ -353,129 +446,299 @@ class singleTh_container(Node):
     def _exec_vlm_process(self):
         self.vlm_idle = True
         while rclpy.ok():
-            if self.vlm_idle:
-                if self._state is ILGP_State.TEST_VLM:
-                    if self.latest_rgb_for_vlm is None or self.latest_rgb_stamp_ns is None:
-                        self.get_logger().warn("No cached RGB available for VLM trigger")
-                        self._state = ILGP_State.WAIT_TRIGGER
-                        continue
+            if not self.vlm_idle or self._state is not ILGP_State.INFER_VLM or not self._vlm_request_pending:
+                time.sleep(0.1)
+                continue
 
-                    # Push RGB into ring only at VLM trigger time.
-                    self._image_pool_ring.update_rgb(
-                        self.latest_rgb_stamp_ns,
-                        self.latest_rgb_for_vlm
-                    )
-
-                    #1. 从图像池获取最近的4帧图像（如果有的话）
-                    packs = []
-                    if self._image_pool_ring.size() == 0:
-                        self.get_logger().warn("No synced RGB/Depth pack after VLM-triggered RGB push")
-                        self._state = ILGP_State.WAIT_TRIGGER
-                        continue
-                    elif self._image_pool_ring.size() >= 10:
-                        packs = self._image_pool_ring.get_latest(10)
-                    else:
-                        packs = self._image_pool_ring.get_latest(self._image_pool_ring.size())
-                    #2. 将图像送入VLM API进行推理
-                    self.vlm_idle = False
-                    if not packs:
-                        self.get_logger().warn("No images for VLM")
-                        continue
-
-                    rgb_list = [p.rgb_bgr.copy() for p in packs]
-
-                    instruction =  "go to the door" # input("input VLM instruction: ")
-                    self.get_logger().info(f"Sending VLM instruction: {instruction}")
-
-                    res_raw = self.vlm_client.infer_vlm(instruction, rgb_list)
-                    self.get_logger().info(f"VLM infer result: {res_raw}")
-
-                    if res_raw['ok'] is not True:
-                        continue
-                    # 3. 将VLM结果、图像和深度等信息打包，并计算目标点在地图坐标系中的位置
-                    self.result_nav_info = nav_info(
-                        stamp_ns = packs[-1].stamp_ns,
-                        image_color = packs[-1].rgb_bgr,
-                        image_depth = packs[-1].depth,
-                        image_uv = res_raw.get('uv', (-1, -1)),
-                        vlm_result = res_raw,
-                        local_map_waypoint = None
-                    )
-                    
-                    self.result_img = rgb_list[-1].copy()
-                    cv2.circle(self.result_img, (res_raw['uv'][0], res_raw['uv'][1]), 10, (0,255,0), 2)
-                    
-                    self.vlm_idle = True
-                    self._state = ILGP_State.WAIT_TRIGGER
-
-                    if self.camera_frame is None:
-                        self.get_logger().warn("Skipping point computation because camera_frame is not available yet")
-                        continue
-                    try:
-                        T_goal_from_cam = self.tf_buffer.lookup_transform(
-                            self.goal_frame,
-                            self.camera_frame,
-                            rclpy.time.Time(),
-                            timeout=Duration(seconds=0.2)
-                        )
-                    except tf2_ros.TransformException as e:
-                        self.get_logger().warn(
-                            f"TF lookup failed for {self.goal_frame}->{self.camera_frame}: {e}"
-                        )
-                        T_goal_from_cam = None
-                        self.get_logger().warn("Skipping point computation due to missing TF")
-                        continue
-                    pt_map = self.image_exta.process_uv_to_point(
-                        self.result_nav_info.image_uv,
-                        self.result_nav_info.image_depth,
-                        T_goal_from_cam
-                    )
-
-                    if pt_map is None:
-                        self.get_logger().warn("process_uv_to_point returned None")
-                        continue
-
-                    # 兼容 (x, y) / (x, y, z)
-                    goal_x = float(pt_map[0])
-                    goal_y = float(pt_map[1])
-
-                    # 在目标坐标系中，让机器人朝向目标点
-                    try:
-                        T_goal_from_base = self.tf_buffer.lookup_transform(
-                            self.goal_frame,
-                            self.base_frame,
-                            rclpy.time.Time(),
-                            timeout=Duration(seconds=0.2)
-                        )
-                        base_x = float(T_goal_from_base.transform.translation.x)
-                        base_y = float(T_goal_from_base.transform.translation.y)
-                        yaw = math.atan2(goal_y - base_y, goal_x - base_x)
-                    except tf2_ros.TransformException as e:
-                        self.get_logger().warn(
-                            f"TF lookup failed for {self.goal_frame}->{self.base_frame}, "
-                            f"fallback yaw uses origin. detail: {e}"
-                        )
-                        yaw = math.atan2(goal_y, goal_x)
-
-                    self.result_nav_info.local_map_waypoint = (goal_x, goal_y)
-
-                    self.publish_goal_to_bridge(goal_x, goal_y, yaw)
-                elif self._state is ILGP_State.INFER_VLM:
+            self._vlm_request_pending = False
+            self.vlm_idle = False
+            try:
+                if self.latest_rgb_for_vlm is None or self.latest_rgb_stamp_ns is None:
+                    self.get_logger().warn("No cached RGB available for VLM trigger")
                     self._state = ILGP_State.WAIT_TRIGGER
                     continue
 
+                pre_pair_count = self._image_pool_ring.size()
+
+                # Push RGB into ring only when a fresh VLM request is queued.
+                self._image_pool_ring.update_rgb(
+                    self.latest_rgb_stamp_ns,
+                    self.latest_rgb_for_vlm
+                )
+
+                # Give the next depth callback a short window to pair with the queued RGB.
+                wait_deadline = time.monotonic() + 0.70
+                while self._image_pool_ring.size() <= pre_pair_count and time.monotonic() < wait_deadline:
+                    time.sleep(0.02)
+
+                #1. 从图像池获取最近的图像
+                packs = []
+                if self._image_pool_ring.size() <= pre_pair_count:
+                    sync_info = self._image_pool_ring.pending_sync_info()
+                    dt_ms = None
+                    if sync_info["dt_ns"] is not None:
+                        dt_ms = sync_info["dt_ns"] / 1e6
+                    self.get_logger().warn(
+                        "No synced RGB/Depth pack after VLM-triggered RGB push; "
+                        f"rgb_ns={sync_info['rgb_ns']} depth_ns={sync_info['depth_ns']} "
+                        f"dt_ms={dt_ms} tol_ms={sync_info['tol_ns'] / 1e6:.1f}"
+                    )
+                    self._state = ILGP_State.WAIT_TRIGGER
+                    continue
+                if self._image_pool_ring.size() >= 1:
+                    packs = self._image_pool_ring.get_latest(1)
+                else:
+                    packs = self._image_pool_ring.get_latest(self._image_pool_ring.size())
+
+                #2. 将图像送入VLM API进行推理
+                if not packs:
+                    self.get_logger().warn("No images for VLM")
+                    self.result_nav_info = None
+                    self.pending_goal_pose = None
+                    self.vlm_result_ready = True
+                    continue
+
+                rgb_list = [p.rgb_bgr.copy() for p in packs]
+
+                instruction =  USER_INSTRUCTION # input("input VLM instruction: ")
+                self.get_logger().info(f"Sending VLM instruction: {instruction}")
+
+                res_raw = self.vlm_client.infer_vlm(instruction, rgb_list)
+                self._log_vlm_raw_text(res_raw)
+                self.get_logger().info(f"VLM infer result: {res_raw}")
+
+                if res_raw['ok'] is not True:
+                    self.result_nav_info = None
+                    self.pending_goal_pose = None
+                    self.vlm_result_ready = True
+                    continue
+
+                # 3. 将VLM结果、图像和深度等信息打包，并计算目标点在地图坐标系中的位置
+                self.result_nav_info = nav_info(
+                    stamp_ns = packs[-1].stamp_ns,
+                    image_color = packs[-1].rgb_bgr,
+                    image_depth = packs[-1].depth,
+                    image_uv = res_raw.get('uv', (-1, -1)),
+                    vlm_result = res_raw,
+                    local_map_waypoint = None
+                )
+                
+                self.result_img = rgb_list[-1].copy()
+                waypoint_uv = self.result_nav_info.image_uv
+                img_h, img_w = self.result_img.shape[:2]
+                uv_in_bounds = (
+                    waypoint_uv is not None and
+                    len(waypoint_uv) == 2 and
+                    0 <= int(waypoint_uv[0]) < img_w and
+                    0 <= int(waypoint_uv[1]) < img_h
+                )
+                if uv_in_bounds:
+                    cv2.circle(self.result_img, (int(waypoint_uv[0]), int(waypoint_uv[1])), 10, (0,255,0), 2)
+
+                waypoint_depth_m = self.image_exta.get_depth_meters(
+                    waypoint_uv,
+                    self.result_nav_info.image_depth
+                )
+                if waypoint_depth_m is not None:
+                    depth_text = f"waypoint depth: {waypoint_depth_m:.3f} m"
+                    self.get_logger().info(
+                        f"Waypoint depth at uv={tuple(map(int, waypoint_uv))}: {waypoint_depth_m:.3f} m"
+                    )
+                    depth_color = (0, 255, 0)
+                else:
+                    depth_text = "waypoint depth: N/A"
+                    self.get_logger().warn(f"Waypoint depth unavailable at uv={waypoint_uv}")
+                    depth_color = (0, 0, 255)
+
+                # cv2.putText(
+                #     self.result_img,
+                #     depth_text,
+                #     (10, 30),
+                #     cv2.FONT_HERSHEY_SIMPLEX,
+                #     0.8,
+                #     depth_color,
+                #     2
+                # )
+
+                if self.camera_frame is None:
+                    self.get_logger().warn("Skipping point computation because camera_frame is not available yet")
+                    self.pending_goal_pose = None
+                    self.vlm_result_ready = True
+                    continue
+                try:
+                    T_goal_from_cam = self.tf_buffer.lookup_transform(
+                        self.goal_frame,
+                        self.camera_frame,
+                        rclpy.time.Time(),
+                        timeout=Duration(seconds=0.2)
+                    )
+                except tf2_ros.TransformException as e:
+                    self.get_logger().warn(
+                        f"TF lookup failed for {self.goal_frame}->{self.camera_frame}: {e}"
+                    )
+                    self.pending_goal_pose = None
+                    self.vlm_result_ready = True
+                    self.get_logger().warn("Skipping point computation due to missing TF")
+                    continue
+                # 4. 将计算得到的目标点发送给Bridge节点
+                pt_map = self.image_exta.process_uv_to_point(
+                    self.result_nav_info.image_uv,
+                    self.result_nav_info.image_depth,
+                    T_goal_from_cam
+                )
+
+                if pt_map is None:
+                    self.get_logger().warn("process_uv_to_point returned None")
+                    self.pending_goal_pose = None
+                    self.vlm_result_ready = True
+                    continue
+
+                # 兼容 (x, y) / (x, y, z)
+                goal_x = float(pt_map[0])
+                goal_y = float(pt_map[1])
+
+                # 在目标坐标系中，让机器人朝向目标点
+                try:
+                    T_goal_from_base = self.tf_buffer.lookup_transform(
+                        self.goal_frame,
+                        self.base_frame,
+                        rclpy.time.Time(),
+                        timeout=Duration(seconds=0.2)
+                    )
+                    base_x = float(T_goal_from_base.transform.translation.x)
+                    base_y = float(T_goal_from_base.transform.translation.y)
+                    yaw = math.atan2(goal_y - base_y, goal_x - base_x)
+                except tf2_ros.TransformException as e:
+                    self.get_logger().warn(
+                        f"TF lookup failed for {self.goal_frame}->{self.base_frame}, "
+                        f"fallback yaw uses origin. detail: {e}"
+                    )
+                    yaw = math.atan2(goal_y, goal_x)
+
+                self.result_nav_info.local_map_waypoint = (goal_x, goal_y)
+                self.pending_goal_pose = (goal_x, goal_y, yaw)
+                self.vlm_result_ready = True
+            finally:
+                self.vlm_idle = True
 
             time.sleep(0.1)
 
 
     def _exec_ilgp_process(self):
         while rclpy.ok():
-            if self._state == ILGP_State.WAIT_TRIGGER:
-                pass  # TODO: wait for trigger
-            elif self._state == ILGP_State.PLAN_TRAJ:
-                pass  # TODO: plan trajectory
-            elif self._state == ILGP_State.Moving:
-                pass  # TODO: execute movement
+            if self._state is not self._last_logged_state:
+                self.get_logger().info(f"ILGP state -> {self._state.name}")
+                self._last_logged_state = self._state
+
+            if self._state is ILGP_State.INIT:
+                self.get_logger().info("ILGP state machine initialized -> WAIT_TRIGGER")
+                self._state = ILGP_State.WAIT_TRIGGER
+
+            elif self._state is ILGP_State.WAIT_TRIGGER:
+                pass
+
+            elif self._state is ILGP_State.INFER_VLM:
+                if not self.vlm_result_ready and self.vlm_idle and not self._infer_wait_logged:
+                    self.get_logger().info("INFER_VLM active: waiting for VLM worker result")
+                    self._infer_wait_logged = True
+                if not self.vlm_result_ready:
+                    pass
+                elif self.result_nav_info is None:
+                    self.get_logger().warn("VLM finished without a valid result, back to WAIT_TRIGGER")
+                    self._infer_wait_logged = False
+                    self.vlm_result_ready = False
+                    self.pending_goal_pose = None
+                    self._state = ILGP_State.WAIT_TRIGGER
+                else:
+                    self._infer_wait_logged = False
+                    sta = str(self.result_nav_info.vlm_result.get('sta', '')).strip().lower()
+                    if sta == 'finish':
+                        self.get_logger().info("VLM reports instruction finished, back to WAIT_TRIGGER")
+                        self.vlm_result_ready = False
+                        self.pending_goal_pose = None
+                        self.ensure_nav2 = False
+                        self._state = ILGP_State.WAIT_TRIGGER
+                    elif sta == 'move':
+                        if self.pending_goal_pose is None:
+                            self.get_logger().warn("VLM requested move but no waypoint was computed")
+                            self.vlm_result_ready = False
+                            self._state = ILGP_State.WAIT_TRIGGER
+                        else:
+                            goal_x, goal_y, goal_yaw = self.pending_goal_pose
+                            self.get_logger().info(
+                                f"VLM produced waypoint ({goal_x:.3f}, {goal_y:.3f}, {goal_yaw:.3f}), "
+                                "switching to Moving"
+                            )
+                            self.vlm_result_ready = False
+                            self.nav_goal_dispatched = False
+                            self._moving_wait_logged = False
+                            self._state = ILGP_State.Moving
+                    elif sta == 'noway':
+                        self.get_logger().warn("VLM reports instruction is currently impossible, back to WAIT_TRIGGER")
+                        self.vlm_result_ready = False
+                        self.pending_goal_pose = None
+                        self.ensure_nav2 = False
+                        self._state = ILGP_State.WAIT_TRIGGER
+                    else:
+                        self.get_logger().warn(f"Unknown VLM state '{sta}', back to WAIT_TRIGGER")
+                        self.vlm_result_ready = False
+                        self.pending_goal_pose = None
+                        self.ensure_nav2 = False
+                        self._state = ILGP_State.WAIT_TRIGGER
+
+            elif self._state is ILGP_State.Moving:
+                if self.pending_goal_pose is None:
+                    self.get_logger().warn("Moving state has no pending goal, back to WAIT_TRIGGER")
+                    self.nav_goal_dispatched = False
+                    self._moving_wait_logged = False
+                    self.ensure_nav2 = False
+                    self._state = ILGP_State.WAIT_TRIGGER
+                elif not self.ensure_nav2:
+                    if not self._moving_wait_logged:
+                        self.get_logger().info("Moving state is waiting for ensure_nav2=True before dispatching Nav2 goal")
+                        self._moving_wait_logged = True
+                else:
+                    if not self.nav_goal_dispatched:
+                        goal_x, goal_y, goal_yaw = self.pending_goal_pose
+                        self.publish_goal_to_bridge(goal_x, goal_y, goal_yaw)
+                        self.nav_goal_dispatched = True
+                        self._moving_wait_logged = False
+                        self.get_logger().info("Nav2 goal dispatched, waiting for navigation result")
+                    elif self.latest_nav_result == 'success':
+                        self.get_logger().info("Navigation succeeded, back to WAIT_TRIGGER for the next LB trigger")
+                        self.latest_nav_result = ''
+                        self.latest_nav_status = ''
+                        self.latest_nav_feedback = ''
+                        self.nav_goal_dispatched = False
+                        self.pending_goal_pose = None
+                        self.result_nav_info = None
+                        self.ensure_nav2 = False
+                        self._moving_wait_logged = False
+                        self._state = ILGP_State.WAIT_TRIGGER
+                    elif self.latest_nav_result in ('canceled', 'failed: aborted by nav2'):
+                        self.get_logger().warn(
+                            f"Navigation ended with result '{self.latest_nav_result}', back to WAIT_TRIGGER"
+                        )
+                        self.latest_nav_result = ''
+                        self.latest_nav_status = ''
+                        self.latest_nav_feedback = ''
+                        self.nav_goal_dispatched = False
+                        self.pending_goal_pose = None
+                        self.result_nav_info = None
+                        self.ensure_nav2 = False
+                        self._state = ILGP_State.WAIT_TRIGGER
+                    elif self.latest_nav_result.startswith('failed:') or self.latest_nav_result.startswith('finished_with_status_'):
+                        self.get_logger().warn(
+                            f"Navigation failed with result '{self.latest_nav_result}', back to WAIT_TRIGGER"
+                        )
+                        self.latest_nav_result = ''
+                        self.latest_nav_status = ''
+                        self.latest_nav_feedback = ''
+                        self.nav_goal_dispatched = False
+                        self.pending_goal_pose = None
+                        self.result_nav_info = None
+                        self.ensure_nav2 = False
+                        self._state = ILGP_State.WAIT_TRIGGER
             time.sleep(0.1)
 
 

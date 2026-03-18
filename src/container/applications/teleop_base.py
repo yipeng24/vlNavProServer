@@ -35,11 +35,23 @@ class teleop_base:
         self._call_vlm_button_pressed = False
         self._trans_vlm_triggered = False
 
+        self._ensure_nav_button = joy_enum.Y 
+        self._ensure_nav_button_pressed = False
+        self._ensure_nav_triggered = False
+
+    def _button_is_pressed(self, joy: Optional[Joy], button_id: int) -> bool:
+        if joy is None:
+            return False
+        if button_id < 0 or button_id >= len(joy.buttons):
+            return False
+        return joy.buttons[button_id] == 1
 
     def joy_update(self, joy: Joy):
         self._joy_state = joy
 
-        self.nav_button_pressed = self._button_hold_pressed(joy_enum.A)
+        # Hold A to forward Nav2's /cmd_vel_nav to the robot /cmd_vel output.
+        self.nav_button_pressed = self._button_is_pressed(self._joy_state, self.nav_hold_button)
+        self._trans_use_nav = self.nav_button_pressed
 
         self.snapshot_button_pressed = self._button_pressed_edge(joy_enum.B)
         if self.snapshot_button_pressed and not self._trans_snapshot_triggered:
@@ -48,6 +60,10 @@ class teleop_base:
         self._call_vlm_button_pressed = self._button_pressed_edge(self._call_vlm_button)
         if self._call_vlm_button_pressed and not self._trans_vlm_triggered:
             self._trans_vlm_triggered = True
+
+        self._ensure_nav_button_pressed = self._button_pressed_edge(self._ensure_nav_button)
+        if self._ensure_nav_button_pressed and not self._ensure_nav_triggered:
+            self._ensure_nav_triggered = True
 
         self._lastest_joy_state = self._joy_state
 
@@ -74,12 +90,18 @@ class teleop_base:
     def _button_hold_pressed(self, button_id: int) -> bool:
         if self._joy_state is None or self._lastest_joy_state is None:
             return False
-        return (self._joy_state.buttons[button_id] == 1 and
-                self._lastest_joy_state.buttons[button_id] == 1)
+        return (
+            self._button_is_pressed(self._joy_state, button_id) and
+            self._button_is_pressed(self._lastest_joy_state, button_id)
+        )
 
 
     def _button_pressed_edge(self, button_id: int) -> bool:
-        if self._joy_state is None or self._lastest_joy_state is None:
+        if self._joy_state is None:
             return False
-        return (self._joy_state.buttons[button_id] == 1 and
-                self._lastest_joy_state.buttons[button_id] == 0)
+        if self._lastest_joy_state is None:
+            return self._button_is_pressed(self._joy_state, button_id)
+        return (
+            self._button_is_pressed(self._joy_state, button_id) and
+            not self._button_is_pressed(self._lastest_joy_state, button_id)
+        )

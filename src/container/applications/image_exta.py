@@ -46,12 +46,27 @@ class image_exta:
             self.Kc = np.array(msg.k, dtype=np.float64).reshape(3, 3)
             self.color_h, self.color_w = msg.height, msg.width
 
+    def get_depth_meters(self, uv, depth_img):
+        if depth_img is None or uv is None:
+            return None
+
+        u, v = int(uv[0]), int(uv[1])
+        h, w = depth_img.shape[:2]
+        if u < 0 or v < 0 or u >= w or v >= h:
+            print(f"Invalid depth pixel {uv} for image shape {(h, w)}")
+            return None
+
+        z_raw = float(depth_img[v, u]) * DEPTH_SCALE
+        if not np.isfinite(z_raw) or z_raw <= 0:
+            print(f"No depth at pixel {uv}")
+            return None
+
+        return z_raw
 
     def process_uv_to_point(self, uv, depth_img, T_map_from_cam: TransformStamped):
         u, v = uv
-        z_raw = depth_img[v, u] * 0.001
-        if z_raw <= 0:
-            print(f"No depth at pixel {uv}")
+        z_raw = self.get_depth_meters(uv, depth_img)
+        if z_raw is None:
             return
         
         Pc = deproject_pixel(self.Kc, u, v, z_raw)

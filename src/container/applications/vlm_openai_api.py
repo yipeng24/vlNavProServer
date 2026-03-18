@@ -32,14 +32,21 @@ Input:
 
 Task:
 Decide whether the current instruction is already completed, still requires movement, or is currently impossible.
-If movement is needed, predict one next local target pixel (u, v) in the current frame.
+If movement is needed, predict one next local target pixel (u, v) in the current frame. In order to use as less steps as possible to complete the instruction, try to predict the waypoint that is closest to the final goal, rather than just the nearest one.
+But notice that the predicted target must be on visible walkable floor, locally reachable, safe, and helpful for completing the current instruction. Do not predict targets that are on obstacles, far away, or not helpful for completing the instruction.
 
 Rules:
 1. First judge whether the CURRENT instruction itself is already satisfied using the full history and current frame.
 2. Do not delay completion just because further movement is possible after the instruction is already satisfied.
 3. If the current instruction is already satisfied, output "finish" instead of "move".
-4. If output is "move", the target must be on visible walkable floor, locally reachable, safe, and helpful for completing the current instruction.
+4. If output is "move", the target must be on visible walkable floor, locally reachable, safe, and helpful for completing the current instruction. Trying not to predict targets that are on obstacles.
 5. Output "noway" only if the instruction cannot be executed from the current scene.
+
+Point choosen rules:
+1. The point must be on visible walkable floor, locally reachable, safe, and helpful.
+2. u less than {W/2} means turning left, u greater than {W/2} means turning right. 
+3. w higher measns closer, w lower means farther. But do not choose too far that is not reachable.
+Try to predict points that can complete the instruction as soon as possible, rather than just the nearest one.
 
 Output exactly one JSON object:
 {{"sta":"finish","uv":"(-1,-1)","reason":"..."}}
@@ -54,7 +61,7 @@ or
 class VLMClient:
     def __init__(self):
         self.client = None
-        self.model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini")
+        self.model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
         self.isIDLE = True
         self.init_error = None
 
@@ -226,14 +233,12 @@ if __name__ == "__main__":
 
     img_paths = [
         "~/projects/vlNavProServer/imgs/go_out_of_the_door/02.jpg",
-        "~/projects/vlNavProServer/imgs/go_out_of_the_door/03.jpg",
+        # "~/projects/vlNavProServer/imgs/go_out_of_the_door/03.jpg",
         "~/projects/vlNavProServer/imgs/go_out_of_the_door/05.jpg",
-        # "~/projects/vlNavProServer/imgs/go_out_of_the_door/07.jpg",
-        # "~/projects/vlNavProServer/imgs/go_out_of_the_door/10.jpg",
-        # "~/projects/vlNavProServer/imgs/go_out_of_the_door/11.jpg",
+        "~/projects/vlNavProServer/imgs/go_out_of_the_door/07.jpg",
+        "~/projects/vlNavProServer/imgs/go_out_of_the_door/09.jpg",
+        "~/projects/vlNavProServer/imgs/go_out_of_the_door/11.jpg",
         # "~/projects/vlNavProServer/imgs/go_out_of_the_door/12.jpg",
-       
-
     ]
     img_paths = [os.path.expanduser(p) for p in img_paths]
 
@@ -245,7 +250,26 @@ if __name__ == "__main__":
         frames.append(img)
 
     result = client.infer_vlm(
-        "go out of the door",
+        "go out of the door and turn left till you are in the corridor",
+        # "turn left into the corridor",
         frames
     )
+    image_uv = result.get("uv", (-1, -1))
     print("Result:", result)
+    vis_img = cv2.imread(img_paths[-1])
+    if vis_img is None:
+        raise FileNotFoundError(f"Failed to read image: {img_paths[-1]}")
+
+    if isinstance(image_uv, (tuple, list)) and len(image_uv) == 2:
+        u, v = int(image_uv[0]), int(image_uv[1])
+        h, w = vis_img.shape[:2]
+        if 0 <= u < w and 0 <= v < h:
+            cv2.circle(vis_img, (u, v), 10, (0, 255, 0), 2)
+
+    output_path = os.path.expanduser("~/projects/vlNavProServer/tmp/vlm_openai_result.jpg")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    cv2.imwrite(output_path, vis_img)
+    # cv2.imshow("VLM Result", vis_img)
+    cv2.waitKey(0)
+    print("Image UV:", image_uv)
+    # print("Annotated image saved to:", output_path)

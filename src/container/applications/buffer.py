@@ -64,9 +64,11 @@ class ImageRingBuffer:
         )
         self._buf.append(pack)
 
-        # avoid generating duplicated packs when one topic bursts
+        # RGB is trigger-driven in this app, so clear it after pairing.
+        # Keep the latest depth cached so the next trigger can still pair
+        # with the most recent depth frame if it is within tolerance.
+        self._latest_rgb = None
         self._latest_rgb_ns = None
-        self._latest_depth_ns = None
 
 
     def size(self) -> int:
@@ -78,6 +80,21 @@ class ImageRingBuffer:
             return []
         n = min(n, len(self._buf))
         return list(self._buf)[-n:]
+
+
+    def pending_sync_info(self) -> Dict[str, Any]:
+        rgb_ns = self._latest_rgb_ns
+        depth_ns = self._latest_depth_ns
+        dt_ns = None
+        if rgb_ns is not None and depth_ns is not None:
+            dt_ns = abs(rgb_ns - depth_ns)
+        return {
+            "rgb_ns": rgb_ns,
+            "depth_ns": depth_ns,
+            "dt_ns": dt_ns,
+            "tol_ns": self._tol_ns,
+            "size": len(self._buf),
+        }
 
 
     def save_latest(self, out_dir: Optional[str]) -> Dict[str, Any]:

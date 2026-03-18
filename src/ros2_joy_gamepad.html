@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>ROS2 Joy Controller</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;600;700&family=Outfit:wght@300;400;600;700&display=swap');
+
+  :root {
+    --bg: #0a0e17;
+    --surface: #111827;
+    --surface2: #1a2235;
+    --border: #2a3550;
+    --text: #e2e8f0;
+    --text-dim: #64748b;
+    --accent: #22d3ee;
+    --accent-glow: rgba(34, 211, 238, 0.25);
+    --green: #4ade80;
+    --red: #f87171;
+    --orange: #fb923c;
+    --yellow: #facc15;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Outfit', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100dvh;
+    overflow-x: hidden;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  .grain {
+    position: fixed; inset: 0; z-index: 0; pointer-events: none; opacity: 0.03;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+    background-size: 256px;
+  }
+
+  .app { position: relative; z-index: 1; padding: 16px; max-width: 480px; margin: 0 auto; }
+
+  /* Header */
+  .header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 0; margin-bottom: 16px; border-bottom: 1px solid var(--border);
+  }
+  .header h1 {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 18px; font-weight: 700; letter-spacing: -0.5px;
+    background: linear-gradient(135deg, var(--accent), #a78bfa);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+
+  /* Status badges */
+  .status-row { display: flex; gap: 8px; margin-bottom: 16px; flex-wrap: wrap; }
+  .badge {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; font-weight: 600;
+    padding: 5px 10px; border-radius: 6px;
+    border: 1px solid var(--border); background: var(--surface);
+    display: flex; align-items: center; gap: 6px;
+  }
+  .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    flex-shrink: 0; animation: pulse 2s infinite;
+  }
+  .dot.off { background: var(--red); animation: none; }
+  .dot.on { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.warn { background: var(--orange); }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; } 50% { opacity: 0.5; }
+  }
+
+  /* Connection panel */
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px; margin-bottom: 12px;
+  }
+  .panel-title {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; text-transform: uppercase; letter-spacing: 1.5px;
+    color: var(--text-dim); margin-bottom: 12px;
+  }
+
+  .input-row { display: flex; gap: 8px; }
+  .input-row input {
+    flex: 1; background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); padding: 10px 12px; border-radius: 8px;
+    font-family: 'JetBrains Mono', monospace; font-size: 13px;
+    outline: none; transition: border-color 0.2s;
+  }
+  .input-row input:focus { border-color: var(--accent); }
+  .input-row input::placeholder { color: var(--text-dim); }
+
+  .btn {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; font-weight: 600; padding: 10px 18px;
+    border: none; border-radius: 8px; cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn-accent {
+    background: var(--accent); color: var(--bg);
+  }
+  .btn-accent:active { transform: scale(0.96); }
+  .btn-red { background: var(--red); color: var(--bg); }
+
+  /* Stick visualizer */
+  .sticks-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .stick-box {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px; text-align: center;
+  }
+  .stick-label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--text-dim); text-transform: uppercase;
+    letter-spacing: 1px; margin-bottom: 8px;
+  }
+  .stick-canvas-wrap {
+    position: relative; width: 120px; height: 120px; margin: 0 auto;
+  }
+  .stick-canvas-wrap canvas {
+    width: 100%; height: 100%; border-radius: 50%;
+    background: radial-gradient(circle, var(--surface2), var(--bg));
+    border: 1px solid var(--border);
+  }
+  .stick-vals {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 11px; color: var(--text-dim); margin-top: 6px;
+  }
+
+  /* Buttons grid */
+  .buttons-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(48px, 1fr));
+    gap: 6px;
+  }
+  .btn-cell {
+    aspect-ratio: 1; border-radius: 8px;
+    border: 1px solid var(--border); background: var(--surface);
+    display: flex; align-items: center; justify-content: center;
+    font-family: 'JetBrains Mono', monospace; font-size: 11px;
+    color: var(--text-dim); transition: all 0.1s;
+  }
+  .btn-cell.pressed {
+    background: var(--accent); color: var(--bg);
+    border-color: var(--accent); box-shadow: 0 0 12px var(--accent-glow);
+  }
+
+  /* Rate & info */
+  .info-row {
+    display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap;
+  }
+  .info-card {
+    flex: 1; min-width: 90px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 10px 12px;
+  }
+  .info-card .label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 9px; text-transform: uppercase; letter-spacing: 1px;
+    color: var(--text-dim); margin-bottom: 4px;
+  }
+  .info-card .value {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 16px; font-weight: 700;
+  }
+
+  /* Log */
+  .log-box {
+    background: var(--bg); border: 1px solid var(--border);
+    border-radius: 8px; padding: 10px; max-height: 120px;
+    overflow-y: auto; font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--text-dim); line-height: 1.6;
+  }
+  .log-box .err { color: var(--red); }
+  .log-box .ok { color: var(--green); }
+  .log-box .info { color: var(--accent); }
+
+  /* Deadzone slider */
+  .slider-row {
+    display: flex; align-items: center; gap: 10px; margin-top: 10px;
+  }
+  .slider-row label {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 10px; color: var(--text-dim); text-transform: uppercase;
+    letter-spacing: 1px; white-space: nowrap;
+  }
+  .slider-row input[type=range] {
+    flex: 1; accent-color: var(--accent); height: 4px;
+  }
+  .slider-row .sz {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12px; font-weight: 600; min-width: 36px; text-align: right;
+  }
+</style>
+</head>
+<body>
+<div class="grain"></div>
+<div class="app">
+
+  <!-- Header -->
+  <div class="header">
+    <h1>ROS2 JOY</h1>
+    <span style="font-size:11px;color:var(--text-dim);font-family:'JetBrains Mono',monospace;">v1.0 · Jazzy</span>
+  </div>
+
+  <!-- Status -->
+  <div class="status-row">
+    <div class="badge"><span class="dot off" id="dotWs"></span><span id="lblWs">WS 未连接</span></div>
+    <div class="badge"><span class="dot off" id="dotGp"></span><span id="lblGp">手柄 未连接</span></div>
+  </div>
+
+  <!-- Connection -->
+  <div class="panel">
+    <div class="panel-title">WebSocket 连接</div>
+    <div class="input-row">
+      <input id="wsUrl" type="text" placeholder="ws://192.168.x.x:9090" value="ws://192.168.1.100:9090">
+      <button class="btn btn-accent" id="btnConnect" onclick="toggleConnect()">连接</button>
+    </div>
+    <div class="slider-row">
+      <label>死区</label>
+      <input type="range" min="0" max="30" value="5" id="deadzone" oninput="updateDz()">
+      <span class="sz" id="dzVal">0.05</span>
+    </div>
+    <div class="slider-row">
+      <label>频率 Hz</label>
+      <input type="range" min="5" max="60" value="20" id="rateHz" oninput="updateRate()">
+      <span class="sz" id="rateVal">20</span>
+    </div>
+  </div>
+
+  <!-- Sticks -->
+  <div class="sticks-row">
+    <div class="stick-box">
+      <div class="stick-label">Left Stick</div>
+      <div class="stick-canvas-wrap"><canvas id="cvL" width="240" height="240"></canvas></div>
+      <div class="stick-vals" id="valL">0.00 , 0.00</div>
+    </div>
+    <div class="stick-box">
+      <div class="stick-label">Right Stick</div>
+      <div class="stick-canvas-wrap"><canvas id="cvR" width="240" height="240"></canvas></div>
+      <div class="stick-vals" id="valR">0.00 , 0.00</div>
+    </div>
+  </div>
+
+  <!-- Buttons -->
+  <div class="panel">
+    <div class="panel-title">Buttons</div>
+    <div class="buttons-grid" id="btnsGrid"></div>
+  </div>
+
+  <!-- Info -->
+  <div class="info-row">
+    <div class="info-card">
+      <div class="label">发送速率</div>
+      <div class="value" id="txRate">0 Hz</div>
+    </div>
+    <div class="info-card">
+      <div class="label">已发送</div>
+      <div class="value" id="txCount">0</div>
+    </div>
+    <div class="info-card">
+      <div class="label">延迟</div>
+      <div class="value" id="latency">-- ms</div>
+    </div>
+  </div>
+
+  <!-- Log -->
+  <div class="panel">
+    <div class="panel-title">Log</div>
+    <div class="log-box" id="logBox"></div>
+  </div>
+
+</div>
+
+<script>
+// ============================================================
+//  核心逻辑: Gamepad API → WebSocket → rosbridge → /joy topic
+// ============================================================
+
+let ws = null;
+let connected = false;
+let gamepad = null;
+let sendInterval = null;
+let deadzone = 0.05;
+let rateHz = 20;
+let txTotal = 0;
+let txPerSec = 0;
+let txSecCounter = 0;
+
+// ---- Logging ----
+const logBox = document.getElementById('logBox');
+function log(msg, cls = '') {
+  const d = new Date();
+  const ts = [d.getHours(), d.getMinutes(), d.getSeconds()].map(v => String(v).padStart(2, '0')).join(':');
+  logBox.innerHTML += `<div class="${cls}">[${ts}] ${msg}</div>`;
+  logBox.scrollTop = logBox.scrollHeight;
+}
+
+// ---- Deadzone & Rate ----
+function updateDz() {
+  deadzone = parseInt(document.getElementById('deadzone').value) / 100;
+  document.getElementById('dzVal').textContent = deadzone.toFixed(2);
+}
+function updateRate() {
+  rateHz = parseInt(document.getElementById('rateHz').value);
+  document.getElementById('rateVal').textContent = rateHz;
+  if (sendInterval) { clearInterval(sendInterval); sendInterval = setInterval(publishJoy, 1000 / rateHz); }
+}
+
+// ---- Apply deadzone ----
+function applyDz(v) {
+  return Math.abs(v) < deadzone ? 0.0 : v;
+}
+
+// ---- WebSocket (rosbridge_suite protocol) ----
+function toggleConnect() {
+  if (connected) { disconnect(); return; }
+  const url = document.getElementById('wsUrl').value.trim();
+  if (!url) return;
+  log(`正在连接 ${url} ...`, 'info');
+  try {
+    ws = new WebSocket(url);
+  } catch (e) {
+    log('URL 格式错误', 'err'); return;
+  }
+
+  ws.onopen = () => {
+    connected = true;
+    updateStatusDot('dotWs', true); document.getElementById('lblWs').textContent = 'WS 已连接';
+    document.getElementById('btnConnect').textContent = '断开';
+    document.getElementById('btnConnect').className = 'btn btn-red';
+    log('WebSocket 已连接', 'ok');
+
+    // 广播 advertise /joy topic
+    ws.send(JSON.stringify({
+      op: 'advertise',
+      topic: '/joy',
+      type: 'sensor_msgs/msg/Joy'
+    }));
+    log('已广播 /joy topic', 'info');
+
+    // 开始定时发送
+    sendInterval = setInterval(publishJoy, 1000 / rateHz);
+  };
+
+  ws.onerror = (e) => { log('WebSocket 错误', 'err'); };
+  ws.onclose = () => { disconnect(); log('WebSocket 已断开', 'err'); };
+}
+
+function disconnect() {
+  if (ws) {
+    // unadvertise
+    try {
+      ws.send(JSON.stringify({ op: 'unadvertise', topic: '/joy' }));
+    } catch(e) {}
+    ws.close();
+  }
+  ws = null; connected = false;
+  if (sendInterval) { clearInterval(sendInterval); sendInterval = null; }
+  updateStatusDot('dotWs', false);
+  document.getElementById('lblWs').textContent = 'WS 未连接';
+  document.getElementById('btnConnect').textContent = '连接';
+  document.getElementById('btnConnect').className = 'btn btn-accent';
+}
+
+// ---- 发布 Joy 消息 (rosbridge JSON 协议) ----
+function publishJoy() {
+  if (!connected || !ws || ws.readyState !== 1) return;
+
+  // 重新获取 gamepad 快照 (iOS Safari 需要每帧重新获取)
+  const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+  let gp = null;
+  for (const g of gps) { if (g && g.connected) { gp = g; break; } }
+  if (!gp) return;
+
+  // 构建 axes (应用死区)
+  const axes = Array.from(gp.axes).map(a => applyDz(a));
+
+  // 构建 buttons (pressed → 1.0 / 0.0)
+  const buttons = Array.from(gp.buttons).map(b => b.pressed ? 1.0 : (typeof b.value === 'number' ? b.value : 0.0));
+
+  // ROS2 时间戳
+  const now = Date.now();
+  const sec = Math.floor(now / 1000);
+  const nanosec = (now % 1000) * 1000000;
+
+  // sensor_msgs/msg/Joy 消息格式
+  const msg = {
+    op: 'publish',
+    topic: '/joy',
+    msg: {
+      header: {
+        stamp: { sec: sec, nanosec: nanosec },
+        frame_id: 'joy'
+      },
+      axes: axes,       // float32[]
+      buttons: buttons.map(v => v >= 0.5 ? 1 : 0)  // int32[] (0 or 1)
+    }
+  };
+
+  ws.send(JSON.stringify(msg));
+  txTotal++;
+  txSecCounter++;
+}
+
+// ---- Gamepad 连接/断开 ----
+window.addEventListener('gamepadconnected', (e) => {
+  gamepad = e.gamepad;
+  updateStatusDot('dotGp', true);
+  document.getElementById('lblGp').textContent = `手柄: ${e.gamepad.id.slice(0, 20)}`;
+  log(`手柄已连接: ${e.gamepad.id}`, 'ok');
+  initButtonGrid(e.gamepad.buttons.length);
+});
+
+window.addEventListener('gamepaddisconnected', (e) => {
+  gamepad = null;
+  updateStatusDot('dotGp', false);
+  document.getElementById('lblGp').textContent = '手柄 未连接';
+  log('手柄已断开', 'err');
+});
+
+// ---- 按钮 UI 格 ----
+function initButtonGrid(count) {
+  const grid = document.getElementById('btnsGrid');
+  grid.innerHTML = '';
+  for (let i = 0; i < count; i++) {
+    const d = document.createElement('div');
+    d.className = 'btn-cell'; d.id = `bc${i}`; d.textContent = `B${i}`;
+    grid.appendChild(d);
+  }
+}
+
+// ---- 可视化绘制 (摇杆圆盘) ----
+function drawStick(canvasId, x, y) {
+  const cv = document.getElementById(canvasId);
+  const ctx = cv.getContext('2d');
+  const w = cv.width, h = cv.height, cx = w / 2, cy = h / 2, r = w / 2 - 10;
+
+  ctx.clearRect(0, 0, w, h);
+
+  // 背景环
+  ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.strokeStyle = '#2a3550'; ctx.lineWidth = 2; ctx.stroke();
+
+  // 十字线
+  ctx.beginPath(); ctx.moveTo(cx - r, cy); ctx.lineTo(cx + r, cy);
+  ctx.moveTo(cx, cy - r); ctx.lineTo(cx, cy + r);
+  ctx.strokeStyle = '#1e293b'; ctx.lineWidth = 1; ctx.stroke();
+
+  // 摇杆位置
+  const px = cx + x * r;
+  const py = cy + y * r;
+
+  // 连线
+  ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(px, py);
+  ctx.strokeStyle = 'rgba(34,211,238,0.4)'; ctx.lineWidth = 2; ctx.stroke();
+
+  // 圆点
+  ctx.beginPath(); ctx.arc(px, py, 12, 0, Math.PI * 2);
+  ctx.fillStyle = '#22d3ee';
+  ctx.shadowColor = '#22d3ee'; ctx.shadowBlur = 14;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+}
+
+// ---- 主渲染循环 ----
+function renderLoop() {
+  const gps = navigator.getGamepads ? navigator.getGamepads() : [];
+  let gp = null;
+  for (const g of gps) { if (g && g.connected) { gp = g; break; } }
+
+  if (gp) {
+    const axes = gp.axes;
+    const lx = applyDz(axes[0] || 0), ly = applyDz(axes[1] || 0);
+    const rx = applyDz(axes[2] || 0), ry = applyDz(axes[3] || 0);
+
+    drawStick('cvL', lx, ly);
+    drawStick('cvR', rx, ry);
+
+    document.getElementById('valL').textContent = `${lx.toFixed(2)} , ${ly.toFixed(2)}`;
+    document.getElementById('valR').textContent = `${rx.toFixed(2)} , ${ry.toFixed(2)}`;
+
+    // 按钮高亮
+    for (let i = 0; i < gp.buttons.length; i++) {
+      const el = document.getElementById(`bc${i}`);
+      if (el) el.className = gp.buttons[i].pressed ? 'btn-cell pressed' : 'btn-cell';
+    }
+  } else {
+    drawStick('cvL', 0, 0);
+    drawStick('cvR', 0, 0);
+  }
+
+  requestAnimationFrame(renderLoop);
+}
+requestAnimationFrame(renderLoop);
+
+// ---- 统计计数 ----
+setInterval(() => {
+  txPerSec = txSecCounter;
+  txSecCounter = 0;
+  document.getElementById('txRate').textContent = txPerSec + ' Hz';
+  document.getElementById('txCount').textContent = txTotal;
+}, 1000);
+
+// ---- 辅助 ----
+function updateStatusDot(id, on) {
+  document.getElementById(id).className = on ? 'dot on' : 'dot off';
+}
+
+// ---- 初始化提示 ----
+log('请按一下手柄任意键以激活 Gamepad API', 'info');
+log('iOS Safari 需要先按下按钮才能检测手柄', 'info');
+</script>
+</body>
+</html>
