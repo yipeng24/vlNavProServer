@@ -81,8 +81,8 @@ class teleop_base:
         if abs(angular_input) < self.deadzone:
             angular_input = 0.0
 
-        linear_velocity = linear_input * self.scale_linear
-        angular_velocity = angular_input * self.scale_angular
+        linear_velocity = -linear_input * self.scale_linear
+        angular_velocity = -angular_input * self.scale_angular
 
         return linear_velocity, angular_velocity
 

@@ -1,0 +1,9 @@
+[2026-03-16 13:10:37 | sta=move]
+{"sta":"move","uv":"(380,320)","reason":"Not at the white trash can yet. The white bin is visible ahead slightly to the right; selected a walkable floor pixel ahead-right (locally reachable) to go straight then turn right and approach the white trash can as the instruction requires."}
+
+[2026-03-16 13:11:49 | sta=move]
+{"sta":"move","uv":"(520,360)","reason":"The white trash can is visible in the current frame but the agent is not yet at it, so the instruction is not finished. The selected pixel is on the visible walkable floor near the base/front of the white bin (right side of image), locally reachable and will move the agent directly toward the trash can to complete the instruction."}
+
+[2026-03-16 13:12:31 | sta=finish]
+{"sta":"finish","uv":"(-1,-1)","reason":"The white trash can is visible and right next to the agent in the current frame (lower-left corner). The history shows approach (Frame2) and arrival (Frame3), so the instruction to go straight, turn right, then go straight to the white trash can and stop is satisfied."}
+

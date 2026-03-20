@@ -1,0 +1,10 @@
+[2026-03-18 21:09:19 | sta=move]
+```json
+{"sta":"move","uv":"(300,240)","reason":"The instruction is not yet completed as the next step is to enter the corridor and turn right. Predicting a target point in the corridor to guide towards the sofa."}
+```
+
+[2026-03-18 21:11:30 | sta=move]
+```json
+{"sta":"move","uv":"(325,360)","reason":"The instruction is not completed yet; moving forward into the corridor to reach the final destination (sofa) is necessary."}
+```
+

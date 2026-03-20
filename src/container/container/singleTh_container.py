@@ -46,14 +46,21 @@ class ILGP_State(Enum):
     INFER_VLM = auto(),    # 进行VLM推理
     Moving = auto(),       
 
-USER_INSTRUCTION = "go straight and turn right, then go straight to the white trash can and stop there"
+# USER_INSTRUCTION = "go straight and turn right, then go straight to the white trash can and stop there"
+# USER_INSTRUCTION = "go out of the door, walk into the corridor, and turn right stop at the sofa"
+# USER_INSTRUCTION = "follow the corridor till the end and stop at the Formula One race car"
+USER_INSTRUCTION = "Head to the building opposite and stop at the elevator at the right inside the building"
+
+HISTROY_NUM = 10
 class singleTh_container(Node):
     def __init__(self):
         super().__init__("singleTh_container")
         # plugin-1: movement, initialize teleop_base
         self._teleop_base: teleop_base = teleop_base()
         self._image_pool_ring: ImageRingBuffer = ImageRingBuffer(maxlen=30, sync_tolerance_ms=200)
-        self.vlm_client: VLMClient = VLMClient()
+        # self.vlm_client: VLMClient = VLMClient(model="gpt-4o-mini")
+        self.vlm_client: VLMClient = VLMClient(model="gpt-5-mini")
+
         self.image_exta: image_exta = image_exta()
         self._state: ILGP_State = ILGP_State.INIT
         self.result_nav_info: nav_info = None
@@ -485,8 +492,8 @@ class singleTh_container(Node):
                     )
                     self._state = ILGP_State.WAIT_TRIGGER
                     continue
-                if self._image_pool_ring.size() >= 1:
-                    packs = self._image_pool_ring.get_latest(1)
+                if self._image_pool_ring.size() >= HISTROY_NUM:
+                    packs = self._image_pool_ring.get_latest(HISTROY_NUM)
                 else:
                     packs = self._image_pool_ring.get_latest(self._image_pool_ring.size())
 

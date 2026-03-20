@@ -1,0 +1,15 @@
+[2026-03-20 16:35:44 | sta=move]
+{"sta":"move","uv":"(140,320)","reason":"Not yet inside the building — the entrance is visible at left. The chosen point is on the walkable ground just outside the door (locally reachable and close) to approach and then enter to stop just inside."}
+
+[2026-03-20 16:36:54 | sta=move]
+{"sta":"move","uv":"(330,300)","reason":"Instruction not yet satisfied — current view shows the building entrance but the agent is still outside. Chosen point (330,300) lies on the visible walkable floor directly in front of the door (clear, reachable) to approach the entrance and progress toward stopping just inside."}
+
+[2026-03-20 16:37:38 | sta=move]
+{"sta":"move","uv":"(340,300)","reason":"The entrance is visible but the agent is still outside; the instruction requires stopping just inside the door. The chosen pixel is on the visible walkable floor directly toward the doorway (slightly right of center to line up with the open door), reachable and will move the agent forward toward and through the threshold to complete the instruction."}
+
+[2026-03-20 16:38:21 | sta=move]
+{"sta":"move","uv":"(330,360)","reason":"The history shows approaching the glass doors but the agent is still outside; the goal is to be just inside. The chosen point is on the visible walkable floor just past the doorway (slightly right of center, near the bottom of the frame) so a small forward step will put the agent just inside the building."}
+
+[2026-03-20 16:38:55 | sta=finish]
+{"sta":"finish","uv":"(-1,-1)","reason":"Current frame shows the interior just inside the open door (threshold, interior floor and potted plants visible). The agent is already just inside the building, so the instruction is satisfied."}
+

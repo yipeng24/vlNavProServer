@@ -1,0 +1,2 @@
+USER_INSTRUCTION = "go out of the door, walk into the corridor, and turn right stop at the sofa"
+

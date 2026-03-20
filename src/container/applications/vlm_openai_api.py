@@ -46,6 +46,7 @@ Point choosen rules:
 1. The point must be on visible walkable floor, locally reachable, safe, and helpful.
 2. u less than {W/2} means turning left, u greater than {W/2} means turning right. 
 3. w higher measns closer, w lower means farther. But do not choose too far that is not reachable.
+4. If the newest two frames are very similar, it means the robot is stuck, then try to predict a point that is farther to get unstuck, if possible.
 Try to predict points that can complete the instruction as soon as possible, rather than just the nearest one.
 
 Output exactly one JSON object:
@@ -57,11 +58,11 @@ or
 """
     return prompt.strip()
 
-
+#brief, model = "gpt-5-mini" or gpt-4o-mini
 class VLMClient:
-    def __init__(self):
+    def __init__(self, model="gpt-5-mini"):
         self.client = None
-        self.model = os.getenv("OPENAI_MODEL", "gpt-5-mini")
+        self.model = os.getenv("OPENAI_MODEL", model)
         self.isIDLE = True
         self.init_error = None
 
