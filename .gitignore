@@ -14,3 +14,4 @@ wandb
 promts/apikey.txt
 .vln_venv/
 .env
+/thesis_plan

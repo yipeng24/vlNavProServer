@@ -1,0 +1,2 @@
+USER_INSTRUCTION = "Walk through the cafe and stop at the sofa in the corner on the left."
+

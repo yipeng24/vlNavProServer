@@ -52,7 +52,7 @@ class ILGP_State(Enum):
 # USER_INSTRUCTION = "Head to the building opposite and stop at the elevator at the right inside the building"
 USER_INSTRUCTION = "Walk through the cafe and stop at the sofa in the corner on the left."
 
-HISTROY_NUM = 1
+HISTROY_NUM = 10
 class singleTh_container(Node):
     def __init__(self):
         super().__init__("singleTh_container")
@@ -60,7 +60,7 @@ class singleTh_container(Node):
         self._teleop_base: teleop_base = teleop_base()
         self._image_pool_ring: ImageRingBuffer = ImageRingBuffer(maxlen=30, sync_tolerance_ms=200)
         # self.vlm_client: VLMClient = VLMClient(model="gpt-4o-mini")
-        self.vlm_client: VLMClient = VLMClient(model="gpt-5-mini")
+        self.vlm_client: VLMClient = VLMClient(model="gpt-4.1-mini")
 
         self.image_exta: image_exta = image_exta()
         self._state: ILGP_State = ILGP_State.INIT
