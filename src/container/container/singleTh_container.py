@@ -49,9 +49,10 @@ class ILGP_State(Enum):
 # USER_INSTRUCTION = "go straight and turn right, then go straight to the white trash can and stop there"
 # USER_INSTRUCTION = "go out of the door, walk into the corridor, and turn right stop at the sofa"
 # USER_INSTRUCTION = "follow the corridor till the end and stop at the Formula One race car"
-USER_INSTRUCTION = "Head to the building opposite and stop at the elevator at the right inside the building"
+# USER_INSTRUCTION = "Head to the building opposite and stop at the elevator at the right inside the building"
+USER_INSTRUCTION = "Walk through the cafe and stop at the sofa in the corner on the left."
 
-HISTROY_NUM = 10
+HISTROY_NUM = 1
 class singleTh_container(Node):
     def __init__(self):
         super().__init__("singleTh_container")
@@ -128,7 +129,7 @@ class singleTh_container(Node):
         self.flip_rgb,self.flip_depth = True, True
         self.flip_code = -1  # -1: both, 0: vertical, 1: horizontal
         self.bridge = CvBridge()
-        self.image_viewer_scale = 1.0
+        self.image_viewer_scale = 2.0
         cv2.namedWindow("ILGP Viewer", cv2.WINDOW_NORMAL)
         # cv2.namedWindow("Viewer Current", cv2.WINDOW_NORMAL)
 
@@ -288,7 +289,16 @@ class singleTh_container(Node):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0,255,255), 2)
 
         merged = np.vstack([vis, history_strip])
-        cv2.imshow("ILGP Viewer", merged)
+        display_img = merged
+        if self.image_viewer_scale != 1.0:
+            display_img = cv2.resize(
+                merged,
+                None,
+                fx=self.image_viewer_scale,
+                fy=self.image_viewer_scale,
+                interpolation=cv2.INTER_LINEAR,
+            )
+        cv2.imshow("ILGP Viewer", display_img)
         if self.result_img is not None:
             cv2.imshow("VLM Debug", self.result_img)
         # else:

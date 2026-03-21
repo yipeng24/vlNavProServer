@@ -36,6 +36,7 @@ If movement is needed, predict one next local target pixel (u, v) in the current
 But notice that the predicted target must be on visible walkable floor, locally reachable, safe, and helpful for completing the current instruction. Do not predict targets that are on obstacles, far away, or not helpful for completing the instruction.
 
 Rules:
+0. You have a body which is 0.5 meter wide. You cant pass through gaps narrower than 0.5 meter or across the chair or table. You can only move on walkable floor, and can not move on obstacles. 
 1. First judge whether the CURRENT instruction itself is already satisfied using the full history and current frame.
 2. Do not delay completion just because further movement is possible after the instruction is already satisfied.
 3. If the current instruction is already satisfied, output "finish" instead of "move".

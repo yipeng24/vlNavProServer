@@ -1,0 +1,2 @@
+USER_INSTRUCTION = "Head to the building opposite and stop at the elevator at the right inside the building"
+
